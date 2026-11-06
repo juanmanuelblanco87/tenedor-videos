@@ -27,12 +27,27 @@ const reelsDe = (html, cuenta) => {
   for (const m of dec.matchAll(/instagram\.com\/(?:([a-z0-9._]+)\/)?reels?\/([A-Za-z0-9_-]{6,})/gi)) if (!m[1] || m[1].toLowerCase() === cuenta) codigos.add(m[2]);
   return codigos.size;
 };
+const html = async (u) => {
+  const r = await fetch(u, { headers: { "user-agent": UA, "accept-language": "es-AR,es" } });
+  const t = r.ok ? await r.text() : "";
+  return r.ok && !/captcha|unusual|are you a robot/i.test(t.slice(0, 20000)) ? t : null;
+};
 const fuentes = {
+  brave: async (c) => {
+    const t = await html(`https://search.brave.com/search?q=${encodeURIComponent(`${c} instagram reels`)}`);
+    return t == null ? { bloqueo: "brave" } : { n: reelsDe(t, c) };
+  },
+  mojeek: async (c) => {
+    const t = await html(`https://www.mojeek.com/search?q=${encodeURIComponent(`${c} instagram reel`)}`);
+    return t == null ? { bloqueo: "mojeek" } : { n: reelsDe(t, c) };
+  },
   bing: async (c) => {
+    if (process.argv[3] === "solo-nuevas") return { n: 0 };
     const r = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(`site:instagram.com/reel ${c}`)}&count=30&setlang=es`, { headers: { "user-agent": UA, "accept-language": "es-AR,es" } });
     return r.ok ? { n: reelsDe(await r.text(), c) } : { bloqueo: r.status };
   },
   ddg: async (c) => {
+    if (process.argv[3] === "solo-nuevas") return { n: 0 };
     if (process.argv[3] === "tiktok") return { n: 0 };
     const r = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(`site:instagram.com/reel ${c}`)}`, { headers: { "user-agent": UA } });
     const t = r.ok ? await r.text() : "";
