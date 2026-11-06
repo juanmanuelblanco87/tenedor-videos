@@ -143,7 +143,7 @@ const copiados = new Set();
 async function copiar(p) {
   const limpio = String(p.id).replace(/[^\w-]/g, "");
   const nuevo = await linkNuevo(String(p.permalink));
-  await espera(2_000);
+  await espera(4_000); // 06/11: con 2 s Instagram cortó a los ~490 pedidos
   if (!nuevo) {
     est.sinLink++;
     fallidos.add(String(p.restaurante_id));

@@ -1,9 +1,9 @@
-# Motor de videos: corre cada 6 horas (tandas de hasta 5,5 h) y a mano (Actions → motor → Run workflow).
+# Motor de videos: corre cada 3 horas (tandas de hasta 2,8 h; Instagram suele cortar a yt-dlp a los ~450 videos) y a mano (Actions → motor → Run workflow).
 # Repositorio público: los minutos de GitHub Actions no se cuentan. Las claves son secretos del repositorio.
 name: motor
 on:
   schedule:
-    - cron: "15 */6 * * *"
+    - cron: "15 */3 * * *"
   workflow_dispatch:
     inputs:
       max:
@@ -15,7 +15,7 @@ concurrency:
 jobs:
   videos:
     runs-on: ubuntu-latest
-    timeout-minutes: 345
+    timeout-minutes: 175
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -30,4 +30,4 @@ jobs:
       - name: ffmpeg y yt-dlp
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null && pip install -q -U yt-dlp
       - name: Videos vencidos con link nuevo
-        run: node motor.mjs --minutos 330 --a-la-vez 4 --por-local 2 ${{ inputs.max && format('--max {0}', inputs.max) || '' }}
+        run: node motor.mjs --minutos 165 --a-la-vez 2 --por-local 2 ${{ inputs.max && format('--max {0}', inputs.max) || '' }}
