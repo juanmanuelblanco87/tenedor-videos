@@ -17,12 +17,12 @@ async function d1(sql) {
   return j.result[0].results;
 }
 const filas = await d1(`SELECT lower(ltrim(r.instagram,'@')) AS ig, lower(ltrim(coalesce(r.tiktok,''),'@')) AS tt FROM restaurantes r JOIN locales_prioridad lp ON lp.restaurante_id = r.id
-  WHERE lp.nivel IN ('S','A') AND coalesce(r.instagram,'') <> '' AND r.estado <> 'cerrado' AND NOT EXISTS (SELECT 1 FROM videos_copia c WHERE c.restaurante_id = r.id)
+  WHERE lp.nivel IN ('S','A') AND coalesce(r.instagram,'') <> '' AND ('${process.argv[3] ?? ""}' <> 'tiktok' OR coalesce(r.tiktok,'') <> '') AND r.estado <> 'cerrado' AND NOT EXISTS (SELECT 1 FROM videos_copia c WHERE c.restaurante_id = r.id)
   ORDER BY random() LIMIT ${Math.min(50, N)}`);
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36";
 const espera = (ms) => new Promise((x) => setTimeout(x, ms));
 const reelsDe = (html, cuenta) => {
-  const dec = decodeURIComponent(html.replace(/&amp;/g, "&"));
+  const dec = html.replace(/&amp;/g, "&").replace(/%2F/gi, "/").replace(/%3A/gi, ":");
   const codigos = new Set();
   for (const m of dec.matchAll(/instagram\.com\/(?:([a-z0-9._]+)\/)?reels?\/([A-Za-z0-9_-]{6,})/gi)) if (!m[1] || m[1].toLowerCase() === cuenta) codigos.add(m[2]);
   return codigos.size;
@@ -33,6 +33,7 @@ const fuentes = {
     return r.ok ? { n: reelsDe(await r.text(), c) } : { bloqueo: r.status };
   },
   ddg: async (c) => {
+    if (process.argv[3] === "tiktok") return { n: 0 };
     const r = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(`site:instagram.com/reel ${c}`)}`, { headers: { "user-agent": UA } });
     const t = r.ok ? await r.text() : "";
     return r.ok && !/anomaly|captcha/i.test(t) ? { n: reelsDe(t, c) } : { bloqueo: r.status || "captcha" };

@@ -6,6 +6,9 @@ on:
       cuentas:
         description: "Cuántas cuentas probar"
         default: "10"
+      modo:
+        description: "vacío o tiktok (sólo cuentas con TikTok)"
+        default: ""
 jobs:
   probar:
     runs-on: ubuntu-latest
@@ -19,4 +22,4 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: pip install -q -U yt-dlp
-      - run: node buscar-prueba.mjs ${{ inputs.cuentas }}
+      - run: node buscar-prueba.mjs ${{ inputs.cuentas }} ${{ inputs.modo }}
