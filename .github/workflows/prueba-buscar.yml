@@ -1,0 +1,22 @@
+# Prueba (sólo lee): Bing, DuckDuckGo y perfiles de TikTok (yt-dlp) como fuentes de links de videos de S/A.
+name: prueba-buscar
+on:
+  workflow_dispatch:
+    inputs:
+      cuentas:
+        description: "Cuántas cuentas probar"
+        default: "10"
+jobs:
+  probar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_APP_ID: ${{ secrets.D1_APP_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: pip install -q -U yt-dlp
+      - run: node buscar-prueba.mjs ${{ inputs.cuentas }}
