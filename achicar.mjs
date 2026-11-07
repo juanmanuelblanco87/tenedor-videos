@@ -149,6 +149,9 @@ await Promise.all(
           if (intento === 2) {
             est.errores++;
             est.primerError ||= e instanceof Error ? e.message : String(e);
+            // Falla 3 veces seguidas (404 en Hostinger o archivo que ffmpeg no lee): no se reintenta en cada tanda.
+            sinMejora.add(String(f.publicacion_id));
+            console.log(`ERROR ${f.publicacion_id} ${f.url} · ${(e instanceof Error ? e.message : String(e)).slice(0, 120)}`);
           } else await espera(5_000 * (intento + 1));
         }
       }
