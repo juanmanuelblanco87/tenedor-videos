@@ -103,7 +103,7 @@ async function achicar(b, limpio) {
     const j = JSON.parse(stdout);
     const v = j.streams.find((s) => s.codec_type === "video");
     const audio = j.streams.some((s) => s.codec_type === "audio");
-    const escala = Number(v?.width) > Number(v?.height) ? "scale=-2:'min(576,ih)'" : "scale='min(576,iw)':-2";
+    const escala = Number(v?.width) > Number(v?.height) ? "scale=-2:'trunc(min(576,ih)/2)*2'" : "scale='trunc(min(576,iw)/2)*2':-2";
     await ejecutar("ffmpeg", ["-y", "-v", "error", "-i", entrada, "-vf", escala, "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-maxrate", "1200k", "-bufsize", "2400k", "-g", "60",
       ...(audio ? ["-c:a", "aac", "-b:a", "96k", "-ac", "2"] : ["-an"]), "-movflags", "+faststart", salida], { timeout: 300_000 });
     const c = readFileSync(salida);
