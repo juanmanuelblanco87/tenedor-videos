@@ -138,6 +138,7 @@ console.log(`Videos vencidos sin copia: ${filas.length} · en esta corrida: ${co
 
 const est = { copiados: 0, sinLink: 0, grandes: 0, errores: 0, mbAntes: 0, mbDespues: 0, primerError: "" };
 const fallidos = new Set();
+const ultimosSinLink = []; // si corta por bloqueo, los últimos «sin link» son el bloqueo, no videos borrados
 const copiados = new Set();
 
 async function copiar(p) {
@@ -147,8 +148,11 @@ async function copiar(p) {
   if (!nuevo) {
     est.sinLink++;
     fallidos.add(String(p.restaurante_id));
+    ultimosSinLink.push(String(p.restaurante_id));
+    if (ultimosSinLink.length > 6) ultimosSinLink.shift();
     return true;
   }
+  ultimosSinLink.length = 0;
   const r = await fetch(nuevo.url, { signal: AbortSignal.timeout(120_000) });
   if (!r.ok) throw new Error(`descarga ${r.status}`);
   const b = Buffer.from(await r.arrayBuffer());
@@ -204,6 +208,7 @@ await Promise.all(
 );
 
 // Los que no se pudieron → pedido a la cola de Meta (dueño 06/11: «los que fallan van a la cola»).
+if (cortado) for (const id of ultimosSinLink) fallidos.delete(id);
 const aCola = [...fallidos].filter((id) => !copiados.has(id));
 for (let k = 0; k < aCola.length; k += 200)
   await d1(
