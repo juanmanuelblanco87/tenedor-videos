@@ -213,7 +213,7 @@ async function conReintentos(p) {
         est.primerError ||= m;
         // Un corte de red (07/11: 14 «fetch failed» seguidos en una parte) no es «sin link»: no va a la cola de Meta y
         // queda para la próxima corrida.
-        if (!/fetch failed|ECONN|ETIMEDOUT|EAI_AGAIN|socket|aborted|timeout|tiempo agotado|(429|5\d\d)/i.test(m)) fallidos.add(String(p.restaurante_id));
+        if (!/fetch failed|ECONN|ETIMEDOUT|EAI_AGAIN|socket|aborted|timeout|tiempo agotado|\b(429|5\d\d)\b/i.test(m)) fallidos.add(String(p.restaurante_id));
       } else await espera(5_000 * (i + 1));
     }
   }
