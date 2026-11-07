@@ -1,0 +1,37 @@
+# Achicado de los videos copiados que quedaron pesados (achicar.mjs, 07/11/2026). 4 máquinas en paralelo, cada hora,
+# tandas de 50 min. Baja de Hostinger (no toca Instagram), achica y vuelve a subir con el mismo nombre.
+name: achicar
+on:
+  schedule:
+    - cron: "40 * * * *"
+  workflow_dispatch:
+    inputs:
+      max:
+        description: "Tope de videos por parte (vacío = los que entren en el tiempo)"
+        required: false
+concurrency:
+  group: achicar
+  cancel-in-progress: false
+jobs:
+  achicar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    strategy:
+      fail-fast: false
+      matrix:
+        parte: [0, 1, 2, 3]
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_APP_ID: ${{ secrets.D1_APP_ID }}
+      HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
+      HOSTINGER_USUARIO: ${{ secrets.HOSTINGER_USUARIO }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: ffmpeg
+        timeout-minutes: 10
+        run: which ffmpeg || timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null || (timeout 300 sudo apt-get update -qq && timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null)
+      - name: Achicar (parte ${{ matrix.parte }})
+        run: node achicar.mjs --partes 4 --parte ${{ matrix.parte }} --mb 4 --minutos 50 --a-la-vez 2 ${{ inputs.max && format('--max {0}', inputs.max) || '' }}
