@@ -1,0 +1,20 @@
+# Verificación de las copias de videos en Hostinger (verificar.mjs, 07/11/2026). Sólo lectura, a mano.
+name: verificar
+on:
+  workflow_dispatch:
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_APP_ID: ${{ secrets.D1_APP_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: node verificar.mjs --a-la-vez 4
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: verificar-404, path: verificar-404.txt, if-no-files-found: ignore }
