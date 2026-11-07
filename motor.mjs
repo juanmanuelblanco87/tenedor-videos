@@ -20,6 +20,9 @@ const MINUTOS = arg("--minutos", 330);
 const A_LA_VEZ = arg("--a-la-vez", 4);
 const POR_LOCAL = arg("--por-local", 2);
 const MAX = arg("--max", Infinity);
+const PARTES = arg("--partes", 1);
+const PARTE = arg("--parte", 0);
+const ESPERA_CORTE_MIN = arg("--espera-corte", 120);
 const MAX_ARCHIVO = 60 * 1024 ** 2;
 const env = process.env;
 for (const k of ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "D1_APP_ID", "D1_FONDO_ID", "HOSTINGER_API_TOKEN", "HOSTINGER_USUARIO"])
@@ -113,6 +116,16 @@ async function achicar(b, limpio) {
   }
 }
 
+// ---------- Guardián: si esta parte cortó por bloqueo hace menos de 2 h, no corre (07/11: relanzar a los 30 min
+// daba 0 copiados). El motor se programa cada hora y sale solo si todavía no toca. ----------
+const CLAVE_CORTE = `motor_videos_corte_${PARTE}_de_${PARTES}`;
+const corte = (await d1(env.D1_APP_ID, "SELECT valor FROM ia_config WHERE clave = ?", [CLAVE_CORTE]))[0];
+const ultimoCorte = corte ? Date.parse(JSON.parse(String(corte.valor)).en ?? "") : NaN;
+if (Number.isFinite(ultimoCorte) && Date.now() - ultimoCorte < ESPERA_CORTE_MIN * 60_000) {
+  console.log(`Parte ${PARTE + 1}/${PARTES}: cortó por bloqueo hace ${Math.round((Date.now() - ultimoCorte) / 60000)} min; espera ${ESPERA_CORTE_MIN} min. Nada que hacer.`);
+  process.exit(0);
+}
+
 // ---------- La cola ----------
 const pendientesMeta = new Set(
   (await d1(env.D1_FONDO_ID, "SELECT DISTINCT restaurante_id FROM pedidos_completitud WHERE tipo = 'video_instagram' AND estado = 'pendiente'")).map((x) => String(x.restaurante_id)),
@@ -125,16 +138,23 @@ const filas = await d1(
      AND NOT EXISTS (SELECT 1 FROM videos_copia c WHERE c.publicacion_id = p.id)
    ORDER BY CASE lp.nivel WHEN 'S' THEN 0 WHEN 'A' THEN 1 ELSE 2 END, lp.puntaje DESC, p.publicado_en DESC`,
 );
+// 07/11 (dueño: «armá las mejoras del motor»): primero UN video de cada comercio que todavía no tiene ninguno (cada
+// video suma un comercio con video), después el resto, hasta POR_LOCAL. Y la lista se reparte entre varias máquinas
+// (--partes N --parte k, por comercio): cada una tiene su IP y Instagram corta por IP.
+const conCopia = new Set((await d1(env.D1_APP_ID, "SELECT DISTINCT restaurante_id FROM videos_copia")).map((x) => String(x.restaurante_id)));
+const hash = (s) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
 const porLocal = new Map();
-const cola = filas
+const elegibles = filas
   .filter((x) => !pendientesMeta.has(String(x.restaurante_id)))
-  .filter((x) => {
+  .filter((x) => hash(String(x.restaurante_id)) % PARTES === PARTE)
+  .map((x) => {
     const k = String(x.restaurante_id);
     porLocal.set(k, (porLocal.get(k) ?? 0) + 1);
-    return porLocal.get(k) <= POR_LOCAL;
+    return { ...x, n: porLocal.get(k) + (conCopia.has(k) ? 1 : 0) };
   })
-  .slice(0, MAX);
-console.log(`Videos vencidos sin copia: ${filas.length} · en esta corrida: ${cola.length} (hasta ${POR_LOCAL} por comercio, de a ${A_LA_VEZ}, ${MINUTOS} min)`);
+  .filter((x) => x.n <= POR_LOCAL);
+const cola = [...elegibles.filter((x) => x.n === 1), ...elegibles.filter((x) => x.n > 1)].slice(0, MAX);
+console.log(`Videos vencidos sin copia: ${filas.length} · parte ${PARTE + 1}/${PARTES}: ${cola.length} (${elegibles.filter((x) => x.n === 1).length} de comercios sin ningún video primero; hasta ${POR_LOCAL} por comercio, de a ${A_LA_VEZ}, ${MINUTOS} min)`);
 
 const est = { copiados: 0, sinLink: 0, grandes: 0, errores: 0, mbAntes: 0, mbDespues: 0, primerError: "" };
 const fallidos = new Set();
@@ -217,5 +237,8 @@ for (let k = 0; k < aCola.length; k += 200)
     [new Date().toISOString(), JSON.stringify(aCola.slice(k, k + 200))],
   );
 rmSync(tmp, { recursive: true, force: true });
-if (cortado) console.log(`CORTÓ: ${cortado}`);
+if (cortado) {
+  console.log(`CORTÓ: ${cortado}`);
+  await d1(env.D1_APP_ID, "INSERT INTO ia_config (clave, valor, actualizado_en) VALUES (?, ?, ?) ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor, actualizado_en = excluded.actualizado_en", [CLAVE_CORTE, JSON.stringify({ en: new Date().toISOString(), copiados: est.copiados }), new Date().toISOString()]);
+}
 console.log(`\nListo en ${Math.round((Date.now() - t0) / 60000)} min: ${JSON.stringify({ ...est, mbAntes: Math.round(est.mbAntes), mbDespues: Math.round(est.mbDespues), comercios: copiados.size, aLaColaDeMeta: aCola.length })}`);
