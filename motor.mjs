@@ -132,7 +132,7 @@ const pendientesMeta = new Set(
 );
 const filas = await d1(
   env.D1_APP_ID,
-  `SELECT p.id, p.restaurante_id, p.permalink FROM publicaciones p LEFT JOIN locales_prioridad lp ON lp.restaurante_id = p.restaurante_id
+  `SELECT p.id, p.restaurante_id, p.permalink, (p.id IN (SELECT publicacion_id FROM videos_elegidos)) AS eleg FROM publicaciones p LEFT JOIN locales_prioridad lp ON lp.restaurante_id = p.restaurante_id
    WHERE p.tipo = 'video' AND p.plataforma = 'instagram' AND NOT p.oculta AND p.permalink LIKE 'https://www.instagram.com/%'
      AND (p.vence_en <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+20 minutes')
           -- 08/11: también los ELEGIDOS sin copia aunque figuren vigentes (su link de descarga ya no anda y la copia del
@@ -155,8 +155,9 @@ const elegibles = filas
     porLocal.set(k, (porLocal.get(k) ?? 0) + 1);
     return { ...x, n: porLocal.get(k) + (conCopia.has(k) ? 1 : 0) };
   })
-  .filter((x) => x.n <= POR_LOCAL);
-const cola = [...elegibles.filter((x) => x.n === 1), ...elegibles.filter((x) => x.n > 1)].slice(0, MAX);
+  // Los ELEGIDOS (los que muestra la app, hasta 3 por comercio) no tienen tope por comercio (08/11).
+  .filter((x) => x.n <= POR_LOCAL || Number(x.eleg) === 1);
+const cola = [...elegibles.filter((x) => x.n === 1), ...elegibles.filter((x) => x.n > 1 && Number(x.eleg) === 1), ...elegibles.filter((x) => x.n > 1 && Number(x.eleg) !== 1)].slice(0, MAX);
 console.log(`Videos vencidos sin copia: ${filas.length} · parte ${PARTE + 1}/${PARTES}: ${cola.length} (${elegibles.filter((x) => x.n === 1).length} de comercios sin ningún video primero; hasta ${POR_LOCAL} por comercio, de a ${A_LA_VEZ}, ${MINUTOS} min)`);
 
 const est = { copiados: 0, sinLink: 0, grandes: 0, errores: 0, mbAntes: 0, mbDespues: 0, primerError: "" };
