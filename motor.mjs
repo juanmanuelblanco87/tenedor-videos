@@ -134,7 +134,10 @@ const filas = await d1(
   env.D1_APP_ID,
   `SELECT p.id, p.restaurante_id, p.permalink FROM publicaciones p LEFT JOIN locales_prioridad lp ON lp.restaurante_id = p.restaurante_id
    WHERE p.tipo = 'video' AND p.plataforma = 'instagram' AND NOT p.oculta AND p.permalink LIKE 'https://www.instagram.com/%'
-     AND p.vence_en <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+20 minutes')
+     AND (p.vence_en <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+20 minutes')
+          -- 08/11: también los ELEGIDOS sin copia aunque figuren vigentes (su link de descarga ya no anda y la copia del
+          -- Worker los saltea como «vencidos» hasta que Meta lo renueve; yt-dlp baja por el permalink).
+          OR p.id IN (SELECT publicacion_id FROM videos_elegidos))
      AND NOT EXISTS (SELECT 1 FROM videos_copia c WHERE c.publicacion_id = p.id)
    ORDER BY CASE lp.nivel WHEN 'S' THEN 0 WHEN 'A' THEN 1 ELSE 2 END, lp.puntaje DESC, p.publicado_en DESC`,
 );
