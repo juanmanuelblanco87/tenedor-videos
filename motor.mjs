@@ -54,15 +54,17 @@ async function d1(base, sql, params = [], intento = 0) {
 // ---------- Hostinger (API de archivos, TUS) ----------
 let sesion = null;
 async function subir(nombre, contenido, reintento = false) {
-  if (!sesion) {
+  // 09/11: la API de Hostinger (upload-urls) falla de a ratos con 500; reintenta con espera creciente antes de rendirse.
+  for (let intento = 0; !sesion; intento++) {
     const r = await fetch("https://developers.hostinger.com/api/hosting/v1/files/upload-urls", {
       method: "POST",
       headers: { authorization: `Bearer ${env.HOSTINGER_API_TOKEN}`, "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify({ username: env.HOSTINGER_USUARIO, domain: DOMINIO }),
       signal: AbortSignal.timeout(20_000),
-    });
-    if (!r.ok) throw new Error(`upload-urls: ${r.status}`);
-    sesion = await r.json();
+    }).catch((e) => ({ ok: false, status: String(e?.name ?? e) }));
+    if (r.ok) sesion = await r.json();
+    else if (intento >= 4) throw new Error(`upload-urls: ${r.status}`);
+    else await new Promise((ok) => setTimeout(ok, 5_000 * 2 ** intento));
   }
   const destino = `${sesion.url.replace(/\/$/, "")}/${nombre}?override=true`;
   const comunes = { "X-Auth": sesion.auth_key, "X-Auth-Rest": sesion.rest_auth_key, "Tus-Resumable": "1.0.0" };
