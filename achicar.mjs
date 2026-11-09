@@ -99,8 +99,8 @@ async function achicar(b, limpio) {
     const j = JSON.parse(stdout);
     const v = j.streams.find((s) => s.codec_type === "video");
     const audio = j.streams.some((s) => s.codec_type === "audio");
-    const escala = Number(v?.width) > Number(v?.height) ? "scale=-2:'trunc(min(576,ih)/2)*2'" : "scale='trunc(min(576,iw)/2)*2':-2";
-    await ejecutar("ffmpeg", ["-y", "-v", "error", "-i", entrada, "-vf", escala, "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-maxrate", "1200k", "-bufsize", "2400k", "-g", "60",
+    const escala = Number(v?.width) > Number(v?.height) ? "scale=-2:'trunc(min(480,ih)/2)*2'" : "scale='trunc(min(480,iw)/2)*2':-2";
+    await ejecutar("ffmpeg", ["-y", "-v", "error", "-i", entrada, "-vf", escala, "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-maxrate", "800k", "-bufsize", "1600k", "-g", "60",
       ...(audio ? ["-c:a", "aac", "-b:a", "96k", "-ac", "2"] : ["-an"]), "-movflags", "+faststart", salida], { timeout: 300_000 });
     return readFileSync(salida);
   } finally {
@@ -112,7 +112,8 @@ async function achicar(b, limpio) {
 const hash = (s) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
 const filas = await d1(env.D1_APP_ID, "SELECT publicacion_id, url, bytes FROM videos_copia WHERE bytes > ? AND url LIKE ? ORDER BY bytes DESC", [MB * 1024 ** 2, `https://${DOMINIO}/videos-ig/%`]);
 // Los que ffmpeg no logra achicar al menos 15 % (ya están en baja calidad) se anotan y no se vuelven a intentar.
-const CLAVE_SIN_MEJORA = `achicar_sin_mejora_${PARTE}`;
+// 09/11 (disco lleno; dueño aprobó la segunda pasada): 480 px / 0,8 Mbps; lista «sin mejora» nueva para esta calidad.
+const CLAVE_SIN_MEJORA = `achicar_sin_mejora_480_${PARTE}`;
 const guardado = (await d1(env.D1_APP_ID, "SELECT valor FROM ia_config WHERE clave = ?", [CLAVE_SIN_MEJORA]))[0];
 const sinMejora = new Set(guardado ? JSON.parse(String(guardado.valor)) : []);
 const cola = filas.filter((f) => hash(String(f.publicacion_id)) % PARTES === PARTE && !sinMejora.has(String(f.publicacion_id))).slice(0, MAX);
