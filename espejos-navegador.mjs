@@ -39,6 +39,7 @@ for (const u of cuentas) {
   const cods = [...new Set([...html.matchAll(/(?:instagram\.com\/(?:p|reel)\/|\/(?:p|reel|post|media)\/)([A-Za-z0-9_-]{10,12})/g)].map((m) => m[1]))];
   const reels = (html.match(/reel|video|\.mp4/gi) ?? []).length;
   const mp4 = [...new Set(html.match(/https:[^"' ]+\.mp4[^"' ]*/g) ?? [])].length;
+  if (process.env.VER) { const txt = await p.evaluate(() => document.body.innerText).catch(() => ""); const hrefs = await p.$eval("a[href]", (as) => as.map((a) => a.getAttribute("href"))).catch(() => []); console.log("TEXTO:", txt.replace(/s+/g, " ").slice(0, 900)); console.log("LINKS:", [...new Set(hrefs)].slice(0, 40).join(" ")); }
   if (cods.length) (conCodigos++, (codigos += cods.length), muestra.push(...cods.slice(0, 1)));
   if (mp4) conReels++;
   console.log(`${u}: ${cods.length} códigos · ${mp4} mp4 directos · menciones video ${reels} · ${Math.round((Date.now() - t0) / 1000)} s · ${(await p.title().catch(() => "")).slice(0, 60)}`);
