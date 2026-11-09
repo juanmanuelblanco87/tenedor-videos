@@ -132,7 +132,7 @@ const pendientesMeta = new Set(
 );
 const filas = await d1(
   env.D1_APP_ID,
-  `SELECT p.id, p.restaurante_id, p.permalink, (p.id IN (SELECT publicacion_id FROM videos_elegidos)) AS eleg FROM publicaciones p LEFT JOIN locales_prioridad lp ON lp.restaurante_id = p.restaurante_id
+  `SELECT p.id, p.restaurante_id, p.permalink, p.media_url, p.portada_url, p.vence_en, (p.id IN (SELECT publicacion_id FROM videos_elegidos)) AS eleg FROM publicaciones p LEFT JOIN locales_prioridad lp ON lp.restaurante_id = p.restaurante_id
    WHERE p.tipo = 'video' AND p.plataforma = 'instagram' AND NOT p.oculta AND p.permalink LIKE 'https://www.instagram.com/%'
      AND (p.vence_en <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+20 minutes')
           -- 08/11: también los ELEGIDOS sin copia aunque figuren vigentes (su link de descarga ya no anda y la copia del
@@ -167,8 +167,11 @@ const copiados = new Set();
 
 async function copiar(p) {
   const limpio = String(p.id).replace(/[^\w-]/g, "");
-  const nuevo = await linkNuevo(String(p.permalink));
-  await espera(4_000); // 06/11: con 2 s Instagram cortó a los ~490 pedidos
+  // 09/11: si la publicación ya trae su link directo vigente (p. ej. leída por anonyig), se baja ése: no se le pide nada a
+  // Instagram (yt-dlp es lo que Instagram corta por IP).
+  const directo = p.media_url && p.vence_en && Date.parse(p.vence_en) > Date.now() + 10 * 60_000 && Date.parse(p.vence_en) < Date.parse("2099-01-01");
+  const nuevo = directo ? { url: String(p.media_url), portada: p.portada_url ? String(p.portada_url) : null } : await linkNuevo(String(p.permalink));
+  if (!directo) await espera(4_000); // 06/11: con 2 s Instagram cortó a los ~490 pedidos
   if (!nuevo) {
     est.sinLink++;
     fallidos.add(String(p.restaurante_id));
