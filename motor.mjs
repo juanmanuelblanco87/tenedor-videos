@@ -121,7 +121,10 @@ async function achicar(b, limpio) {
 const CLAVE_CORTE = `motor_videos_corte_${PARTE}_de_${PARTES}`;
 const corte = (await d1(env.D1_APP_ID, "SELECT valor FROM ia_config WHERE clave = ?", [CLAVE_CORTE]))[0];
 const ultimoCorte = corte ? Date.parse(JSON.parse(String(corte.valor)).en ?? "") : NaN;
-if (Number.isFinite(ultimoCorte) && Date.now() - ultimoCorte < ESPERA_CORTE_MIN * 60_000) {
+// --solo-directos (09/11): sólo los elegidos con link directo vigente (anonyig). No le pide nada a Instagram, así que no
+// espera por bloqueos ni marca cortes; corre seguido (copiar-directos.yml).
+const SOLO_DIRECTOS = process.argv.includes("--solo-directos");
+if (!SOLO_DIRECTOS && Number.isFinite(ultimoCorte) && Date.now() - ultimoCorte < ESPERA_CORTE_MIN * 60_000) {
   console.log(`Parte ${PARTE + 1}/${PARTES}: cortó por bloqueo hace ${Math.round((Date.now() - ultimoCorte) / 60000)} min; espera ${ESPERA_CORTE_MIN} min. Nada que hacer.`);
   process.exit(0);
 }
@@ -139,6 +142,7 @@ const filas = await d1(
           -- Worker los saltea como «vencidos» hasta que Meta lo renueve; yt-dlp baja por el permalink).
           OR p.id IN (SELECT publicacion_id FROM videos_elegidos))
      AND NOT EXISTS (SELECT 1 FROM videos_copia c WHERE c.publicacion_id = p.id)
+     ${SOLO_DIRECTOS ? "AND p.id IN (SELECT publicacion_id FROM videos_elegidos) AND p.vence_en > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+10 minutes') AND p.vence_en < '2099-01-01'" : ""}
    ORDER BY CASE lp.nivel WHEN 'S' THEN 0 WHEN 'A' THEN 1 ELSE 2 END, lp.puntaje DESC, p.publicado_en DESC`,
 );
 // 07/11 (dueño: «armá las mejoras del motor»): primero UN video de cada comercio que todavía no tiene ninguno (cada
