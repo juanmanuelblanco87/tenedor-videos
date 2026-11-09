@@ -137,7 +137,7 @@ const pendientesMeta = new Set(
 );
 const filas = await d1(
   env.D1_APP_ID,
-  `SELECT p.id, p.restaurante_id, p.permalink, p.media_url, p.portada_url, p.vence_en, (p.id IN (SELECT publicacion_id FROM videos_elegidos)) AS eleg FROM publicaciones p LEFT JOIN locales_prioridad lp ON lp.restaurante_id = p.restaurante_id
+  `SELECT p.id, p.restaurante_id, p.permalink, p.media_url, p.portada_url, p.vence_en, (p.id IN (SELECT publicacion_id FROM videos_elegidos)) AS eleg, coalesce(lp.nivel, 'C') AS nivel FROM publicaciones p LEFT JOIN locales_prioridad lp ON lp.restaurante_id = p.restaurante_id
    WHERE p.tipo = 'video' AND p.plataforma = 'instagram' AND NOT p.oculta AND p.permalink LIKE 'https://www.instagram.com/%'
      AND (p.vence_en <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+20 minutes')
           -- 08/11: también los ELEGIDOS sin copia aunque figuren vigentes (su link de descarga ya no anda y la copia del
@@ -150,19 +150,25 @@ const filas = await d1(
 // 07/11 (dueño: «armá las mejoras del motor»): primero UN video de cada comercio que todavía no tiene ninguno (cada
 // video suma un comercio con video), después el resto, hasta POR_LOCAL. Y la lista se reparte entre varias máquinas
 // (--partes N --parte k, por comercio): cada una tiene su IP y Instagram corta por IP.
-const conCopia = new Set((await d1(env.D1_APP_ID, "SELECT DISTINCT restaurante_id FROM videos_copia")).map((x) => String(x.restaurante_id)));
+// 09/11 (disco de Hostinger lleno, 50 GB; dueño: «3 videos para los A, 1 para los B, 6 para las S»): tope de copias
+// POR NIVEL contando las que el comercio ya tiene, también para los elegidos (antes no tenían tope y llenaron el disco).
+// Lo que excedía se archivó en el repo privado tenedor-videos-archivo y se borró de Hostinger.
+const TOPE_NIVEL = { S: 6, A: 3 };
+const tope = (nivel) => Math.min(TOPE_NIVEL[nivel] ?? 1, POR_LOCAL);
+const copiasDe = new Map((await d1(env.D1_APP_ID, "SELECT restaurante_id, count(*) AS c FROM videos_copia GROUP BY restaurante_id")).map((x) => [String(x.restaurante_id), Number(x.c)]));
 const hash = (s) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
 const porLocal = new Map();
 const elegibles = filas
   .filter((x) => !pendientesMeta.has(String(x.restaurante_id)))
   .filter((x) => hash(String(x.restaurante_id)) % PARTES === PARTE)
+  // dentro de cada comercio, los elegidos primero (son los que muestra la app)
+  .sort((a, b) => Number(b.eleg) - Number(a.eleg))
   .map((x) => {
     const k = String(x.restaurante_id);
     porLocal.set(k, (porLocal.get(k) ?? 0) + 1);
-    return { ...x, n: porLocal.get(k) + (conCopia.has(k) ? 1 : 0) };
+    return { ...x, n: porLocal.get(k) + (copiasDe.get(k) ?? 0) };
   })
-  // Los ELEGIDOS (los que muestra la app, hasta 3 por comercio) no tienen tope por comercio (08/11).
-  .filter((x) => x.n <= POR_LOCAL || Number(x.eleg) === 1);
+  .filter((x) => x.n <= tope(x.nivel));
 const cola = [...elegibles.filter((x) => x.n === 1), ...elegibles.filter((x) => x.n > 1 && Number(x.eleg) === 1), ...elegibles.filter((x) => x.n > 1 && Number(x.eleg) !== 1)].slice(0, MAX);
 console.log(`Videos vencidos sin copia: ${filas.length} · parte ${PARTE + 1}/${PARTES}: ${cola.length} (${elegibles.filter((x) => x.n === 1).length} de comercios sin ningún video primero; hasta ${POR_LOCAL} por comercio, de a ${A_LA_VEZ}, ${MINUTOS} min)`);
 
