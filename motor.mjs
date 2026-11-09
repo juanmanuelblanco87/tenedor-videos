@@ -154,7 +154,12 @@ const filas = await d1(
 // POR NIVEL contando las que el comercio ya tiene, también para los elegidos (antes no tenían tope y llenaron el disco).
 // Lo que excedía se archivó en el repo privado tenedor-videos-archivo y se borró de Hostinger.
 const TOPE_NIVEL = { S: 6, A: 3 };
-const tope = (nivel) => Math.min(TOPE_NIVEL[nivel] ?? 1, POR_LOCAL);
+// A+ (dueño 09/11): top 300 A por puntaje (ia_config nivel_a_mas), 6 videos como los S. --solo-a-mas: copia sólo esos
+// (para el resto los videos siguen frenados por el disco de Hostinger).
+const SOLO_A_MAS = process.argv.includes("--solo-a-mas");
+const aMasFila = (await d1(env.D1_APP_ID, "SELECT valor FROM ia_config WHERE clave = 'nivel_a_mas'"))[0];
+const aMas = new Set(aMasFila ? JSON.parse(String(aMasFila.valor)).ids : []);
+const tope = (nivel, id) => Math.min(aMas.has(id) ? 6 : (TOPE_NIVEL[nivel] ?? 1), POR_LOCAL);
 const copiasDe = new Map((await d1(env.D1_APP_ID, "SELECT restaurante_id, count(*) AS c FROM videos_copia GROUP BY restaurante_id")).map((x) => [String(x.restaurante_id), Number(x.c)]));
 const hash = (s) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
 const porLocal = new Map();
@@ -168,7 +173,8 @@ const elegibles = filas
     porLocal.set(k, (porLocal.get(k) ?? 0) + 1);
     return { ...x, n: porLocal.get(k) + (copiasDe.get(k) ?? 0) };
   })
-  .filter((x) => x.n <= tope(x.nivel));
+  .filter((x) => x.n <= tope(x.nivel, String(x.restaurante_id)))
+  .filter((x) => !SOLO_A_MAS || aMas.has(String(x.restaurante_id)));
 const cola = [...elegibles.filter((x) => x.n === 1), ...elegibles.filter((x) => x.n > 1 && Number(x.eleg) === 1), ...elegibles.filter((x) => x.n > 1 && Number(x.eleg) !== 1)].slice(0, MAX);
 console.log(`Videos vencidos sin copia: ${filas.length} · parte ${PARTE + 1}/${PARTES}: ${cola.length} (${elegibles.filter((x) => x.n === 1).length} de comercios sin ningún video primero; hasta ${POR_LOCAL} por comercio, de a ${A_LA_VEZ}, ${MINUTOS} min)`);
 

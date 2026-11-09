@@ -32,4 +32,4 @@ jobs:
         timeout-minutes: 10
         run: which ffmpeg || timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null || (timeout 300 sudo apt-get update -qq && timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null)
       - name: Copiar directos (parte ${{ matrix.parte }})
-        run: node motor.mjs --solo-directos --partes 4 --parte ${{ matrix.parte }} --minutos 18 --a-la-vez 2 --por-local 6
+        run: node motor.mjs --solo-directos --solo-a-mas --partes 4 --parte ${{ matrix.parte }} --minutos 18 --a-la-vez 2 --por-local 6
