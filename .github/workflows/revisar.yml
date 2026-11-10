@@ -20,7 +20,14 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - name: ffmpeg
-        run: which ffmpeg || timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null || (timeout 300 sudo apt-get update -qq && timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null)
+        # 10/11: apt se colgaba en algunas máquinas (exit 124, 4 partes en 2 corridas): hasta 3 intentos con update.
+        run: |
+          which ffmpeg && exit 0
+          for i in 1 2 3; do
+            timeout 300 sudo apt-get update -qq && timeout 420 sudo apt-get install -y -qq ffmpeg >/dev/null && break
+            sleep 20
+          done
+          ffmpeg -version | head -1
       - name: Ollama y el modelo
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
