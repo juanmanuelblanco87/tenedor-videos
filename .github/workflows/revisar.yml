@@ -26,6 +26,7 @@ jobs:
           curl -fsSL https://ollama.com/install.sh | sh
           (ollama serve > /tmp/ollama.log 2>&1 &) && sleep 5
           ollama pull "${{ inputs.modelo || 'lfm3-vl:2b' }}"
+          ollama pull gemma4:e4b
       - run: node revisar.mjs --partes 16 --parte ${{ matrix.parte }} --minutos 300 --modelo "${{ inputs.modelo || 'lfm3-vl:2b' }}"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

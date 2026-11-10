@@ -14,6 +14,9 @@ const env = process.env;
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : d; };
 const PARTES = Number(arg("--partes", 1)), PARTE = Number(arg("--parte", 0)), MINUTOS = Number(arg("--minutos", 300));
 const MODELO = arg("--modelo", "lfm3-vl:2b");
+// 09/11, segunda prueba: el modelo de 2B aprobaba por texto promos de viajes o de muebles. El texto lo juzga Gemma 4 E4B
+// (razona mejor) y un video sólo se aprueba si la IMAGEN muestra algo gastronómico.
+const MODELO_TEXTO = arg("--modelo-texto", "gemma4:e4b");
 const t0 = Date.now();
 
 async function d1(sql, params = []) {
@@ -29,10 +32,10 @@ async function d1(sql, params = []) {
   }
   throw new Error("D1 no responde");
 }
-async function ollama(sistema, texto, imagen) {
+async function ollama(sistema, texto, imagen, modelo = MODELO) {
   const r = await fetch("http://127.0.0.1:11434/api/chat", {
     method: "POST",
-    body: JSON.stringify({ model: MODELO, stream: false, format: "json", think: false, options: { temperature: 0, num_predict: 100 }, messages: [{ role: "system", content: sistema }, { role: "user", content: texto, ...(imagen ? { images: [imagen] } : {}) }] }),
+    body: JSON.stringify({ model: modelo, stream: false, format: "json", think: false, options: { temperature: 0, num_predict: 100 }, messages: [{ role: "system", content: sistema }, { role: "user", content: texto, ...(imagen ? { images: [imagen] } : {}) }] }),
     signal: AbortSignal.timeout(120_000),
   });
   const j = await r.json();
@@ -85,30 +88,28 @@ for (const v of cola) {
   if (Date.now() - t0 > MINUTOS * 60_000) break;
   try {
     const texto = String(v.texto ?? "").trim();
-    let decidido = false;
+    let txt = null;
     if (texto.length >= 25) {
-      const j = await ollama(TEXTO, `Comercio: «${v.nombre}».\nTexto de la publicación: ${texto}`);
-      if (j.gastro === false && Number(j.confianza ?? 0) >= 0.85) {
-        await afuera(v, "texto", String(j.que ?? ""));
-        est.afueraTexto++;
-        decidido = true;
-      } else if (j.gastro === true && Number(j.confianza ?? 0) >= 0.85) {
-        await anotar(v, true, "texto", String(j.que ?? ""), "ok");
-        est.ok++;
-        decidido = true;
-      }
+      const j = await ollama(TEXTO, `Comercio: «${v.nombre}».
+Texto de la publicación: ${texto}`, null, MODELO_TEXTO);
+      txt = { gastro: typeof j.gastro === "boolean" ? j.gastro : null, conf: Number(j.confianza ?? 0), que: String(j.que ?? "") };
     }
-    if (!decidido) {
+    if (txt?.gastro === false && txt.conf >= 0.8) {
+      await afuera(v, "texto", txt.que);
+      est.afueraTexto++;
+    } else {
       const a = await cuadro(String(v.url), 3);
-      const b = a && a.gastro === false ? await cuadro(String(v.url), 9) : null;
-      if (a?.gastro === false && b?.gastro === false) {
-        await afuera(v, "imagen", `${a.que} | ${b.que}`);
-        est.afueraImagen++;
-      } else if (a?.gastro === true || b?.gastro === true) {
-        await anotar(v, true, "imagen", a?.que ?? "", "ok");
+      const b = a?.gastro !== true ? await cuadro(String(v.url), 9) : null;
+      const imagenSi = a?.gastro === true || b?.gastro === true;
+      const imagenNo = a?.gastro === false && (b === null || b.gastro === false);
+      if (imagenSi) {
+        await anotar(v, true, "imagen", a?.gastro ? a.que : (b?.que ?? ""), "ok");
         est.ok++;
+      } else if (imagenNo && txt?.gastro !== true) {
+        await afuera(v, "imagen", `${a?.que ?? ""} | ${b?.que ?? ""}`);
+        est.afueraImagen++;
       } else {
-        await anotar(v, null, "imagen", `${a?.que ?? "sin cuadro"} | ${b?.que ?? ""}`, "dudoso");
+        await anotar(v, null, "imagen", `${a?.que ?? "sin cuadro"} | ${b?.que ?? ""} | texto: ${txt?.que ?? "-"}`, "dudoso");
         est.dudosos++;
       }
     }
