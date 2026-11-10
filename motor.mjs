@@ -138,7 +138,7 @@ const pendientesMeta = new Set(
 const filas = await d1(
   env.D1_APP_ID,
   `SELECT p.id, p.restaurante_id, p.permalink, p.media_url, p.portada_url, p.vence_en, (p.id IN (SELECT publicacion_id FROM videos_elegidos)) AS eleg, coalesce(lp.nivel, 'C') AS nivel FROM publicaciones p LEFT JOIN locales_prioridad lp ON lp.restaurante_id = p.restaurante_id
-   WHERE p.tipo = 'video' AND p.plataforma = 'instagram' AND NOT p.oculta AND p.permalink LIKE 'https://www.instagram.com/%'
+   WHERE p.tipo = 'video' AND p.plataforma = 'instagram' AND (NOT p.oculta OR p.id IN (SELECT publicacion_id FROM videos_revision WHERE accion = 'pendiente')) AND p.permalink LIKE 'https://www.instagram.com/%'
      AND (p.vence_en <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+20 minutes')
           -- 08/11: también los ELEGIDOS sin copia aunque figuren vigentes (su link de descarga ya no anda y la copia del
           -- Worker los saltea como «vencidos» hasta que Meta lo renueve; yt-dlp baja por el permalink).
@@ -151,7 +151,7 @@ const filas = await d1(
 // video suma un comercio con video), después el resto, hasta POR_LOCAL. Y la lista se reparte entre varias máquinas
 // (--partes N --parte k, por comercio): cada una tiene su IP y Instagram corta por IP.
 // 09/11 (disco de Hostinger lleno, 50 GB; dueño: «3 videos para los A, 1 para los B, 6 para las S»): tope de copias
-// POR NIVEL contando las que el comercio ya tiene, también para los elegidos (antes no tenían tope y llenaron el disco).
+// POR NIVEL contando las que el comercio ya tiene VISIBLES (10/11: las que sacó el revisor liberan su lugar), también para los elegidos (antes no tenían tope y llenaron el disco).
 // Lo que excedía se archivó en el repo privado tenedor-videos-archivo y se borró de Hostinger.
 const TOPE_NIVEL = { S: 6, A: 3 };
 // A+ (dueño 09/11): top 300 A por puntaje (ia_config nivel_a_mas), 6 videos como los S. --solo-a-mas: copia sólo esos
@@ -160,7 +160,7 @@ const SOLO_A_MAS = process.argv.includes("--solo-a-mas");
 const aMasFila = (await d1(env.D1_APP_ID, "SELECT valor FROM ia_config WHERE clave = 'nivel_a_mas'"))[0];
 const aMas = new Set(aMasFila ? JSON.parse(String(aMasFila.valor)).ids : []);
 const tope = (nivel, id) => Math.min(aMas.has(id) ? 6 : (TOPE_NIVEL[nivel] ?? 1), POR_LOCAL);
-const copiasDe = new Map((await d1(env.D1_APP_ID, "SELECT restaurante_id, count(*) AS c FROM videos_copia GROUP BY restaurante_id")).map((x) => [String(x.restaurante_id), Number(x.c)]));
+const copiasDe = new Map((await d1(env.D1_APP_ID, "SELECT c.restaurante_id, count(*) AS c FROM videos_copia c JOIN publicaciones p ON p.id = c.publicacion_id WHERE p.oculta = 0 OR p.id IN (SELECT publicacion_id FROM videos_revision WHERE accion = 'pendiente') GROUP BY c.restaurante_id")).map((x) => [String(x.restaurante_id), Number(x.c)]));
 const hash = (s) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
 const porLocal = new Map();
 const elegibles = filas
@@ -179,6 +179,18 @@ const cola = [...elegibles.filter((x) => x.n === 1), ...elegibles.filter((x) => 
 console.log(`Videos vencidos sin copia: ${filas.length} · parte ${PARTE + 1}/${PARTES}: ${cola.length} (${elegibles.filter((x) => x.n === 1).length} de comercios sin ningún video primero; hasta ${POR_LOCAL} por comercio, de a ${A_LA_VEZ}, ${MINUTOS} min)`);
 
 const est = { copiados: 0, sinLink: 0, grandes: 0, errores: 0, mbAntes: 0, mbDespues: 0, primerError: "" };
+// 10/11 (dueño: «mantenemos a Hostinger en un máximo de 45 GB»): tope de disco. ia_config «hostinger_tope»
+// = {"total_gb":45,"otros_gb":12} (otros = fotos, cartas y demás; lo actualiza el encargado de infra). Los videos pueden
+// ocupar total − otros; al llegar, no se copia más (el revisor libera lugar ocultando videos; el borrado lo hace infra).
+const topeFila = (await d1(env.D1_APP_ID, "SELECT valor FROM ia_config WHERE clave = 'hostinger_tope'"))[0];
+const topeDisco = topeFila ? JSON.parse(String(topeFila.valor)) : { total_gb: 45, otros_gb: 12 };
+const usados = Number((await d1(env.D1_APP_ID, "SELECT coalesce(sum(bytes),0) AS b FROM videos_copia"))[0]?.b ?? 0);
+let libres = (Number(topeDisco.total_gb) - Number(topeDisco.otros_gb)) * 1e9 - usados;
+console.log(`Disco Hostinger: videos ${(usados / 1e9).toFixed(1)} GB · tope para videos ${Number(topeDisco.total_gb) - Number(topeDisco.otros_gb)} GB · libres ${(libres / 1e9).toFixed(1)} GB`);
+if (libres <= 0) {
+  console.log("Tope de disco alcanzado: no se copia nada. Nada que hacer.");
+  process.exit(0);
+}
 const fallidos = new Set();
 const ultimosSinLink = []; // si corta por bloqueo, los últimos «sin link» son el bloqueo, no videos borrados
 const copiados = new Set();
@@ -223,6 +235,7 @@ async function copiar(p) {
   est.copiados++;
   est.mbAntes += b.length / 1024 ** 2;
   est.mbDespues += final.length / 1024 ** 2;
+  libres -= final.length;
   copiados.add(String(p.restaurante_id));
   return true;
 }
@@ -248,7 +261,7 @@ let i = 0;
 let hechos = 0;
 await Promise.all(
   Array.from({ length: Math.max(1, Math.min(A_LA_VEZ, cola.length)) }, async () => {
-    while (i < cola.length && !cortado && Date.now() - t0 < MINUTOS * 60_000) {
+    while (i < cola.length && !cortado && libres > 0 && Date.now() - t0 < MINUTOS * 60_000) {
       await conReintentos(cola[i++]);
       if (++hechos % 50 === 0) console.log(`[${hechos}/${cola.length}] ${JSON.stringify({ ...est, mbAntes: Math.round(est.mbAntes), mbDespues: Math.round(est.mbDespues) })} · ${Math.round((Date.now() - t0) / 60000)} min`);
     }

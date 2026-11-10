@@ -66,7 +66,10 @@ const filas = await d1(
   `SELECT e.publicacion_id AS id, e.restaurante_id AS rid, coalesce(lp.nivel,'C') AS nivel, coalesce(lp.puntaje,0) AS puntaje, c.url, substr(coalesce(p.texto,''),1,700) AS texto, r.nombre
    FROM videos_elegidos e JOIN videos_copia c ON c.publicacion_id = e.publicacion_id JOIN publicaciones p ON p.id = e.publicacion_id
    JOIN restaurantes r ON r.id = e.restaurante_id LEFT JOIN locales_prioridad lp ON lp.restaurante_id = e.restaurante_id
-   WHERE p.oculta = 0 AND r.estado <> 'cerrado' AND NOT EXISTS (SELECT 1 FROM videos_revision v WHERE v.publicacion_id = e.publicacion_id)`,
+   WHERE r.estado <> 'cerrado' AND (
+     (p.oculta = 0 AND NOT EXISTS (SELECT 1 FROM videos_revision v WHERE v.publicacion_id = e.publicacion_id))
+     -- 10/11 (dueño): los videos nuevos entran ocultos («pendiente») y recién se muestran si la revisión los aprueba.
+     OR EXISTS (SELECT 1 FROM videos_revision v WHERE v.publicacion_id = e.publicacion_id AND v.accion = 'pendiente'))`,
 );
 const hash = (s) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
 const rango = (x) => (x.nivel === "S" ? 0 : aMas.has(String(x.rid)) ? 1 : x.nivel === "A" ? 2 : x.nivel === "B" ? 3 : 4);
@@ -103,13 +106,16 @@ Texto de la publicación: ${texto}`, null, MODELO_TEXTO);
       const imagenSi = a?.gastro === true || b?.gastro === true;
       const imagenNo = a?.gastro === false && (b === null || b.gastro === false);
       if (imagenSi) {
+        await d1("UPDATE publicaciones SET oculta = 0 WHERE id = ? AND id IN (SELECT publicacion_id FROM videos_revision WHERE accion = 'pendiente')", [String(v.id)]);
         await anotar(v, true, "imagen", a?.gastro ? a.que : (b?.que ?? ""), "ok");
         est.ok++;
       } else if (imagenNo && txt?.gastro !== true) {
         await afuera(v, "imagen", `${a?.que ?? ""} | ${b?.que ?? ""}`);
         est.afueraImagen++;
       } else {
-        await anotar(v, null, "imagen", `${a?.que ?? "sin cuadro"} | ${b?.que ?? ""} | texto: ${txt?.que ?? "-"}`, "dudoso");
+        // 10/11 (dueño: «los que no coinciden o dudosos salen; esto libera cupo para traer nuevos que vuelven a ser
+        // analizados»): el dudoso también sale (su lugar en el tope del comercio queda libre para otro video).
+        await afuera(v, "dudoso", `${a?.que ?? "sin cuadro"} | ${b?.que ?? ""} | texto: ${txt?.que ?? "-"}`);
         est.dudosos++;
       }
     }
