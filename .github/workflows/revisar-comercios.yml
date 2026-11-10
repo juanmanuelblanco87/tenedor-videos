@@ -1,0 +1,30 @@
+# Revisor de comercios (rubro e Instagram) con IA instalable gratis: Ollama + Gemma 4 E4B en máquinas de GitHub (10/11/2026).
+name: revisar-comercios
+on:
+  workflow_dispatch:
+    inputs:
+      niveles:
+        description: "niveles (S,A o B)"
+        default: "S,A"
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        parte: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Ollama y el modelo
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          (ollama serve > /tmp/ollama.log 2>&1 &) && sleep 5
+          ollama pull gemma4:e4b
+      - run: node revisar-comercios.mjs --partes 12 --parte ${{ matrix.parte }} --minutos 300 --niveles "${{ inputs.niveles || 'S,A' }}"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_APP_ID: ${{ secrets.D1_APP_ID }}
