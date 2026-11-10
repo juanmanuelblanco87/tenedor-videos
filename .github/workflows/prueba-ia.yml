@@ -1,0 +1,21 @@
+# Prueba (09/11/2026, dueño: «el revisor de videos tiene que ser una IA instalable gratuita»): modelos de visión de
+# Ollama en una máquina de GitHub (repo público: minutos sin cargo). Mide aciertos y segundos por imagen.
+name: prueba-ia
+on:
+  workflow_dispatch:
+    inputs:
+      modelo:
+        description: "modelo de Ollama"
+        default: "gemma4:e4b"
+jobs:
+  probar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: curl -fsSL https://ollama.com/install.sh | sh
+      - run: (ollama serve > /tmp/ollama.log 2>&1 &) && sleep 5 && ollama pull "${{ inputs.modelo }}"
+      - run: nproc && free -g
+      - run: node prueba-ia.mjs "${{ inputs.modelo }}"
