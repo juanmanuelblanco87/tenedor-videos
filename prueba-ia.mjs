@@ -1,6 +1,6 @@
 // Compara modelos de visión locales (Ollama) sobre cuadros reales: ¿es gastronómico? Uso: node bench.mjs <modelo> [<modelo>...]
 import { readFileSync, readdirSync } from "node:fs";
-const dir = process.argv[1].replace(/bench\.mjs$/, "");
+const dir = "prueba-ia/";
 const esperado = { "ig-scDfcXK40utmC": false, "ig-scDc1N5YIAmDb": false, "ig-scDaBQjdKDIvS": false, "ig-scDfZ_Ec9xkOr": false };
 const SIS = 'Mirás un cuadro de un video publicado por un comercio gastronómico. Respondé SOLO JSON {"gastro": true|false, "confianza": 0..1, "que": "breve"}. gastro = true si muestra comida, bebida, el local o su fachada, su cocina, gente comiendo, brindando o atendiendo, o un cartel/promo del comercio. false si es algo ajeno (animales, naturaleza, una clase o terapia, noticias, deportes, publicidad de otra marca, bebés, obras en construcción, memes).';
 for (const modelo of process.argv.slice(2)) {
