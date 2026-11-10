@@ -1,0 +1,33 @@
+# Revisor de videos con IA instalable gratuita (Ollama + LFM3-VL 2B) en las máquinas de GitHub (09/11/2026).
+# 16 partes en paralelo, tandas de hasta 5 h. Lanzar a mano (GitHub no dispara bien los horarios).
+name: revisar
+on:
+  workflow_dispatch:
+    inputs:
+      modelo:
+        description: "modelo de Ollama"
+        default: "lfm3-vl:2b"
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        parte: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: ffmpeg
+        run: which ffmpeg || timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null || (timeout 300 sudo apt-get update -qq && timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null)
+      - name: Ollama y el modelo
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          (ollama serve > /tmp/ollama.log 2>&1 &) && sleep 5
+          ollama pull "${{ inputs.modelo || 'lfm3-vl:2b' }}"
+      - run: node revisar.mjs --partes 16 --parte ${{ matrix.parte }} --minutos 300 --modelo "${{ inputs.modelo || 'lfm3-vl:2b' }}"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_APP_ID: ${{ secrets.D1_APP_ID }}
