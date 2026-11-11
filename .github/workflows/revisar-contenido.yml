@@ -1,0 +1,31 @@
+# Revisión del contenido de los videos verticales (revisar-contenido.mjs, 11/11/2026): los que son una foto quieta o un
+# horizontal con franjas negras pasan a contar como apaisados (van al final de la tarjeta). 4 máquinas, cada 3 horas.
+name: revisar-contenido
+on:
+  schedule:
+    - cron: "20 */3 * * *"
+  workflow_dispatch:
+concurrency:
+  group: revisar-contenido
+  cancel-in-progress: false
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        parte: [0, 1, 2, 3]
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_APP_ID: ${{ secrets.D1_APP_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: ffmpeg
+        timeout-minutes: 10
+        run: which ffmpeg || timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null || (timeout 300 sudo apt-get update -qq && timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null)
+      - name: Revisar (parte ${{ matrix.parte }})
+        run: node revisar-contenido.mjs --partes 4 --parte ${{ matrix.parte }} --minutos 45
