@@ -1,0 +1,41 @@
+# Encargado de cartas (cartas.mjs = scripts/cf/cartas-github.mts empaquetado, 11/11/2026, dueño: «necesitamos que el
+# encargado de cartas haga esto todo el tiempo de manera autónoma»). La nube de las rutinas no sale a internet y la PC
+# no está siempre: corre acá, gratis. 4 máquinas cada 2 horas: primero las cartas vencidas y nunca leídas; una vez por
+# día (06 UTC) también las S/A marcadas como leídas pero sin platos. Respeta robots.txt; tope de 3 min por carta.
+name: cartas
+on:
+  schedule:
+    - cron: "5 */2 * * *"
+  workflow_dispatch:
+concurrency:
+  group: cartas
+  cancel-in-progress: false
+jobs:
+  cartas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        parte: [0, 1, 2, 3]
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_APP_ID: ${{ secrets.D1_APP_ID }}
+      D1_FONDO_ID: ${{ secrets.D1_FONDO_ID }}
+      D1_HECHOS_ID: ${{ secrets.D1_HECHOS_ID }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+      CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Dependencias (PDF a imagen)
+        run: npm i --no-save --no-audit --no-fund @napi-rs/canvas pdfjs-dist >/dev/null
+      - name: Cartas (parte ${{ matrix.parte }})
+        run: |
+          M=50
+          if [ "$(date -u +%H)" = "06" ]; then node cartas.mjs --partes 4 --parte ${{ matrix.parte }} --minutos 25 --vacias; M=25; fi
+          node cartas.mjs --partes 4 --parte ${{ matrix.parte }} --minutos $M
