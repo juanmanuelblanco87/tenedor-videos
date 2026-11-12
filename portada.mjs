@@ -67,7 +67,8 @@ export async function diferencia(a, b) {
       rmSync(dir, { recursive: true, force: true });
     }
   };
-  const [x, y] = await Promise.all([gris(a), gris(b)]);
+  // Una portada vieja que ffmpeg no lee (dañada, otro formato) cuenta como distinta: se reemplaza.
+  const [x, y] = await Promise.all([gris(a).catch(() => Buffer.alloc(0)), gris(b).catch(() => Buffer.alloc(0))]);
   if (x.length !== y.length || !x.length) return 255;
   let s = 0;
   for (let i = 0; i < x.length; i++) s += Math.abs(x[i] - y[i]);
