@@ -10,6 +10,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { portadaDeVideo } from "./portada.mjs";
 
 const ejecutar = promisify(execFile);
 const arg = (n, def) => {
@@ -220,12 +221,18 @@ async function copiar(p) {
   }
   const final = await achicar(b, limpio);
   const url = await subir(`videos-ig/${limpio}.mp4`, final);
-  if (nuevo.portada) {
-    const img = await fetch(nuevo.portada, { signal: AbortSignal.timeout(20_000) }).then((x) => (x.ok ? x.arrayBuffer() : null)).catch(() => null);
-    if (img) {
-      await subir(`portadas-ig/${limpio}.jpg`, Buffer.from(img)).catch(() => "");
-      await subir(`portadas-ig/${limpio}-160.jpg`, Buffer.from(img)).catch(() => "");
-    }
+  // Portada: el cuadro de los 0,5 s de NUESTRA copia (portada.mjs), no la miniatura de Instagram (12/11: al arrancar el
+  // video en el feed se veía un salto). Si ffmpeg no puede, queda sin portada y la saca portadas-05 / portadas-videos.
+  const archivo = join(tmp, `${limpio}-portada.mp4`);
+  try {
+    writeFileSync(archivo, final);
+    const p05 = await portadaDeVideo(archivo);
+    await subir(`portadas-ig/${limpio}.jpg`, p05.grande).catch(() => "");
+    await subir(`portadas-ig/${limpio}-160.jpg`, p05.chica).catch(() => "");
+  } catch {
+    // sin portada propia por ahora
+  } finally {
+    rmSync(archivo, { force: true });
   }
   // El disparador de videos_copia deja la publicación con vence_en 2100 («no vence»): el nivel de imagen la cuenta solo.
   await d1(

@@ -11,8 +11,8 @@
 //   Instagram, ORDENADO POR VENCIMIENTO (el «oe=<hex>» del link; lo que vence antes va primero):
 //   - videos (elegidos, visibles o en revisión) sin copia: se bajan, se achican como achicar.mjs (480 px, 0,8 Mbps,
 //     faststart), van a R2 videos-ig/<id>.mp4 y se anotan en videos_copia con la URL de media.tenedor.com.ar (igual que
-//     la copia propia de siempre: el disparador deja la publicación «no vence»). Portada a R2 y a Hostinger (la app
-//     todavía la arma con datos.tenedor.com.ar/portadas-ig/).
+//     la copia propia de siempre: el disparador deja la publicación «no vence»). Portada (cuadro de 0,5 s de la copia,
+//     portada.mjs) a R2 y a Hostinger (la app todavía la arma con datos.tenedor.com.ar/portadas-ig/).
 //   - fotos (publicaciones tipo foto visibles y fotos_reales de Instagram): van a R2 fotos-ig/<id>.jpg y la fila pasa a
 //     apuntar a media.tenedor.com.ar con vence_en 2100 (no hay tabla de copias de fotos: el feed lee media_url directo).
 //   - Si el archivo ya está en R2 (copia anterior, o la fila la volvió a pisar un lector con un link nuevo), no se baja:
@@ -30,6 +30,7 @@ import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { portadaDeVideo } from "./portada.mjs";
 
 const ejecutar = promisify(execFile);
 const arg = (n, def) => {
@@ -419,17 +420,20 @@ if (TOPE.directos > 0 && quedaTiempo()) {
       const final = await achicar(b, limpio(x.id));
       await subirR2(x.k, final, "video/mp4");
       est.mb_subidos += final.length / 1024 ** 2;
-      if (x.portada) {
-        const img = await fetch(String(x.portada), { signal: AbortSignal.timeout(20_000) })
-          .then((y) => (y.ok && y.headers.get("content-type")?.startsWith("image/") ? y.arrayBuffer() : null))
-          .catch(() => null);
-        if (img) {
-          const jpg = Buffer.from(img);
-          for (const n of [`portadas-ig/${limpio(x.id)}.jpg`, `portadas-ig/${limpio(x.id)}-160.jpg`]) {
-            await subirR2(n, jpg, "image/jpeg").catch(() => null);
-            await subirHostinger(n, jpg).catch(() => null);
-          }
+      // Portada: el cuadro de los 0,5 s de NUESTRA copia (portada.mjs), no la miniatura de Instagram (12/11: el feed
+      // arranca el video en ese cuadro; con la miniatura se veía un salto). Si ffmpeg no puede, queda para portadas-05.
+      const archivo = join(tmp, `${limpio(x.id)}-portada.mp4`);
+      try {
+        writeFileSync(archivo, final);
+        const p05 = await portadaDeVideo(archivo);
+        for (const [n, jpg] of [[`portadas-ig/${limpio(x.id)}.jpg`, p05.grande], [`portadas-ig/${limpio(x.id)}-160.jpg`, p05.chica]]) {
+          await subirR2(n, jpg, "image/jpeg").catch(() => null);
+          await subirHostinger(n, jpg).catch(() => null);
         }
+      } catch {
+        // sin portada propia por ahora
+      } finally {
+        rmSync(archivo, { force: true });
       }
       await apuntar(x, final.length);
       est.videos++;

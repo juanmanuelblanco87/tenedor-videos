@@ -1,0 +1,48 @@
+# Regenera las portadas propias como el cuadro de los 0,5 s de nuestra copia del video (portadas-05.mjs, 12/11/2026).
+# Tandas de 3000 videos, 4 a la vez con pausa; corta a los 3 errores seguidos (y ahí no se relanza). Se vuelve a lanzar
+# sola mientras queden videos (quedan > 0). Apagar la cadena: variable del repo PORTADAS_05 = apagado.
+# Sale siempre con 0 (sin mails de GitHub). Avance en D1 ia_config «portadas_05».
+name: portadas-05
+on:
+  workflow_dispatch:
+    inputs:
+      max: { description: "Videos por tanda", required: false, default: "3000" }
+      a_la_vez: { description: "Videos a la vez", required: false, default: "4" }
+      prueba: { description: "Prueba (no sube ni avanza): si/no", required: false, default: "no" }
+concurrency:
+  group: portadas-05
+  cancel-in-progress: false
+permissions:
+  actions: write
+  contents: read
+jobs:
+  portadas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_APP_ID: ${{ secrets.D1_APP_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+    outputs:
+      quedan: ${{ steps.regenerar.outputs.quedan }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      # Como motor.yml: «apt-get update» puede colgarse; primero sin update y con tope de tiempo.
+      - name: ffmpeg
+        timeout-minutes: 12
+        run: which ffmpeg || timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null || (timeout 300 sudo apt-get update -qq && timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null)
+      - name: Portadas 0,5 s
+        id: regenerar
+        run: node portadas-05.mjs --max ${{ inputs.max || '3000' }} --a-la-vez ${{ inputs.a_la_vez || '4' }} --pausa 150 --minutos 100 ${{ inputs.prueba == 'si' && '--prueba' || '' }} || true
+  seguir:
+    needs: portadas
+    if: always() && needs.portadas.outputs.quedan != '' && needs.portadas.outputs.quedan != '0' && vars.PORTADAS_05 != 'apagado'
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh workflow run portadas-05.yml -R ${{ github.repository }}
+        env: { GH_TOKEN: "${{ github.token }}" }
