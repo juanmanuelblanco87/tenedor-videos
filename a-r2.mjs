@@ -239,7 +239,8 @@ if (TOPE.directos > 0 && quedaTiempo()) {
      WHERE p.tipo = 'video' AND p.plataforma = 'instagram' AND e.publicacion_id NOT LIKE 'tv-%'
        AND (p.oculta = 0 OR p.id IN (SELECT publicacion_id FROM videos_revision WHERE accion = 'pendiente'))
        AND NOT EXISTS (SELECT 1 FROM videos_copia c WHERE c.publicacion_id = p.id)
-     ORDER BY CASE lp.nivel WHEN 'S' THEN 0 WHEN 'A' THEN 1 WHEN 'B' THEN 2 ELSE 3 END, lp.puntaje DESC, e.orden`,
+     -- primero los visibles; después los que esperan revisión (el revisor necesita la copia)
+     ORDER BY p.oculta, CASE lp.nivel WHEN 'S' THEN 0 WHEN 'A' THEN 1 WHEN 'B' THEN 2 ELSE 3 END, lp.puntaje DESC, e.orden`,
   );
   const limite = Date.now() + 10 * 60_000;
   const vivo = (p) => p.media_url && p.vence_en && Date.parse(p.vence_en) > limite && p.vence_en < "2099";

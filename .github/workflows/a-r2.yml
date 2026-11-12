@@ -5,14 +5,14 @@
 # Sale siempre con 0 (sin mails de GitHub). workflow_dispatch: topes a mano (0 = saltear esa fase).
 name: a-r2
 on:
-  # schedule:
-  #   - cron: "10 */2 * * *"
+  schedule:
+    - cron: "10 */2 * * *"
   workflow_dispatch:
     inputs:
-      portadas: { description: "Tope de portadas", required: false, default: "4000" }
+      portadas: { description: "Tope de portadas", required: false, default: "6000" }
       fotos: { description: "Tope de fotos de IG", required: false, default: "3000" }
-      videos: { description: "Tope de videos (×3 de noche)", required: false, default: "600" }
-      directos: { description: "Tope de directos de Instagram", required: false, default: "300" }
+      videos: { description: "Tope de videos (×3 de noche)", required: false, default: "800" }
+      directos: { description: "Tope de directos de Instagram", required: false, default: "600" }
 concurrency:
   group: a-r2
   cancel-in-progress: false
@@ -31,7 +31,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - name: Hostinger → R2
-        run: node a-r2.mjs --portadas ${{ inputs.portadas || '4000' }} --fotos ${{ inputs.fotos || '3000' }} --videos ${{ inputs.videos || '600' }} --noche-x 3 --minutos 100 || true
+        run: node a-r2.mjs --portadas ${{ inputs.portadas || '6000' }} --fotos ${{ inputs.fotos || '3000' }} --videos ${{ inputs.videos || '800' }} --noche-x 3 --minutos 100 || true
   directos:
     runs-on: ubuntu-latest
     timeout-minutes: 110
@@ -43,4 +43,4 @@ jobs:
         timeout-minutes: 10
         run: which ffmpeg || timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null || (timeout 300 sudo apt-get update -qq && timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null)
       - name: Directos de Instagram → R2
-        run: node a-r2.mjs --directos ${{ inputs.directos || '300' }} --minutos 95 || true
+        run: node a-r2.mjs --directos ${{ inputs.directos || '600' }} --minutos 95 || true
