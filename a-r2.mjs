@@ -25,6 +25,7 @@
 // notificaciones (sale siempre con 0: un rojo de GitHub manda mail). Lo ya copiado se saltea por el listado de R2.
 // Escribe «quedan=<n>» en $GITHUB_OUTPUT: el workflow se vuelve a lanzar solo mientras quede trabajo.
 import { execFile } from "node:child_process";
+import { createHash, createHmac } from "node:crypto";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -114,17 +115,37 @@ async function listarR2(prefijo) {
   }
   return m;
 }
+// Subida: por la API S3 de R2 si están R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT (no cuenta para el límite de
+// 1.200 pedidos cada 5 min de api.cloudflare.com, que comparten D1 y los demás procesos); si no, por la API REST, y ante
+// un 429 espera (30 s, 60 s, 120 s) en vez de insistir: el 12/11 las 4 partes juntas lo tocaron (≈330 «R2 429»).
+const S3 = env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY && env.R2_ENDPOINT ? { id: env.R2_ACCESS_KEY_ID, secreto: env.R2_SECRET_ACCESS_KEY, base: env.R2_ENDPOINT.replace(/\/$/, "") } : null;
+const hmac = (k, d) => createHmac("sha256", k).update(d).digest();
+const sha = (d) => createHash("sha256").update(d).digest("hex");
+const cod = (x) => encodeURIComponent(x).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+function putS3(k, cuerpo, tipo) {
+  const url = new URL(`${S3.base}/${BUCKET}/${k.split("/").map(cod).join("/")}`);
+  const fecha = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+  const dia = fecha.slice(0, 8);
+  const h = { "content-type": tipo, host: url.host, "x-amz-content-sha256": "UNSIGNED-PAYLOAD", "x-amz-date": fecha };
+  const firmados = Object.keys(h).sort().join(";");
+  const canonico = ["PUT", url.pathname, "", ...Object.keys(h).sort().map((x) => `${x}:${h[x]}`), "", firmados, "UNSIGNED-PAYLOAD"].join("\n");
+  const alcance = `${dia}/auto/s3/aws4_request`;
+  const aFirmar = ["AWS4-HMAC-SHA256", fecha, alcance, sha(canonico)].join("\n");
+  const llave = hmac(hmac(hmac(hmac(`AWS4${S3.secreto}`, dia), "auto"), "s3"), "aws4_request");
+  const firma = createHmac("sha256", llave).update(aFirmar).digest("hex");
+  const { host, ...resto } = h;
+  return fetch(url, { method: "PUT", headers: { ...resto, authorization: `AWS4-HMAC-SHA256 Credential=${S3.id}/${alcance}, SignedHeaders=${firmados}, Signature=${firma}` }, body: cuerpo, signal: AbortSignal.timeout(180_000) });
+}
 async function subirR2(k, cuerpo, tipo) {
   for (let intento = 0; ; intento++) {
-    const p = await fetch(`${R2}/${k.split("/").map(encodeURIComponent).join("/")}`, {
-      method: "PUT",
-      headers: { ...auth, "content-type": tipo },
-      body: cuerpo,
-      signal: AbortSignal.timeout(180_000),
-    }).catch((e) => ({ ok: false, status: String(e?.name ?? e), text: async () => "" }));
+    const p = await (S3
+      ? putS3(k, cuerpo, tipo)
+      : fetch(`${R2}/${k.split("/").map(encodeURIComponent).join("/")}`, { method: "PUT", headers: { ...auth, "content-type": tipo }, body: cuerpo, signal: AbortSignal.timeout(180_000) })
+    ).catch((e) => ({ ok: false, status: String(e?.name ?? e), text: async () => "" }));
     if (p.ok) return;
-    if (intento >= 2 || !/^(429|5\d\d|TimeoutError|TypeError)$/.test(String(p.status))) throw new Error(`R2 ${p.status} ${(await p.text()).slice(0, 200)}`);
-    await espera(3_000 * (intento + 1));
+    const st = String(p.status);
+    if (intento >= 3 || !/^(429|5\d\d|TimeoutError|TypeError)$/.test(st)) throw new Error(`R2 ${st} ${(await p.text()).slice(0, 200)}`);
+    await espera(st === "429" ? 30_000 * 2 ** intento : 3_000 * (intento + 1));
   }
 }
 
@@ -327,17 +348,38 @@ if (TOPE.directos > 0 && quedaTiempo()) {
   console.log(`Directos ${est.parte}: ${videos.length} videos sin copia + ${est.fotos_en_cdn} fotos en el CDN · vivos ${est.vivos_total} · vencidos ${vencidos.length} · cola de esta parte ${cola.length} · tope ${TOPE.directos}`);
   const negados = new Set();
 
-  async function apuntar(x, bytes) {
-    if (x.tipo === "video") {
+  // Las filas se anotan de a tandas (una consulta a D1 cada ~40), no una por archivo: menos pedidos a api.cloudflare.com.
+  const porAnotar = { video: [], foto: [], foto_real: [] };
+  async function anotar() {
+    const { video, foto, foto_real } = porAnotar;
+    porAnotar.video = [];
+    porAnotar.foto = [];
+    porAnotar.foto_real = [];
+    if (video.length)
       await d1(
-        "INSERT INTO videos_copia (publicacion_id, restaurante_id, url, bytes, copiado_en) VALUES (?, ?, ?, ?, ?) ON CONFLICT (publicacion_id) DO UPDATE SET url = excluded.url, bytes = excluded.bytes, copiado_en = excluded.copiado_en",
-        [x.id, x.rid, MEDIA + x.k, bytes, new Date().toISOString()],
+        `INSERT INTO videos_copia (publicacion_id, restaurante_id, url, bytes, copiado_en)
+         SELECT value->>'p', value->>'r', value->>'u', value->>'b', value->>'c' FROM json_each(?) WHERE true
+         ON CONFLICT (publicacion_id) DO UPDATE SET url = excluded.url, bytes = excluded.bytes, copiado_en = excluded.copiado_en`,
+        [JSON.stringify(video)],
       );
-    } else if (x.tipo === "foto") {
-      await d1("UPDATE publicaciones SET media_url = ?, vence_en = ? WHERE id = ? AND media_url = ?", [MEDIA + x.k, NO_VENCE, x.id, x.url]);
-    } else {
-      await d1("UPDATE fotos_reales SET url = ?, vence_en = ? WHERE restaurante_id = ? AND orden = ? AND url = ?", [MEDIA + x.k, NO_VENCE, x.rid, x.orden, x.url]);
-    }
+    if (foto.length)
+      await d1(
+        `UPDATE publicaciones SET media_url = j.u, vence_en = ? FROM (SELECT value->>'id' AS id, value->>'u' AS u, value->>'o' AS o FROM json_each(?)) AS j
+         WHERE publicaciones.id = j.id AND publicaciones.media_url = j.o`,
+        [NO_VENCE, JSON.stringify(foto)],
+      );
+    if (foto_real.length)
+      await d1(
+        `UPDATE fotos_reales SET url = j.u, vence_en = ? FROM (SELECT value->>'r' AS r, value->>'n' AS n, value->>'u' AS u, value->>'o' AS o FROM json_each(?)) AS j
+         WHERE fotos_reales.restaurante_id = j.r AND fotos_reales.orden = j.n AND fotos_reales.url = j.o`,
+        [NO_VENCE, JSON.stringify(foto_real)],
+      );
+  }
+  async function apuntar(x, bytes) {
+    if (x.tipo === "video") porAnotar.video.push({ p: x.id, r: x.rid, u: MEDIA + x.k, b: bytes, c: new Date().toISOString() });
+    else if (x.tipo === "foto") porAnotar.foto.push({ id: x.id, u: MEDIA + x.k, o: x.url });
+    else porAnotar.foto_real.push({ r: x.rid, n: x.orden, u: MEDIA + x.k, o: x.url });
+    if (porAnotar.video.length + porAnotar.foto.length + porAnotar.foto_real.length >= 40) await anotar();
   }
 
   async function uno(x) {
@@ -415,6 +457,7 @@ if (TOPE.directos > 0 && quedaTiempo()) {
       }
     }),
   );
+  await anotar().catch((e) => console.log(`  error al anotar la última tanda: ${e instanceof Error ? e.message : e}`));
   const restantes = cola.slice(i).filter(vivo);
   est.proximo_vencimiento = restantes.length ? new Date(restantes[0].vence).toISOString() : "";
   quedan += cola.length - i;
