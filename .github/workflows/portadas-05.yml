@@ -9,6 +9,7 @@ on:
       max: { description: "Videos por tanda", required: false, default: "3000" }
       a_la_vez: { description: "Videos a la vez", required: false, default: "4" }
       prueba: { description: "Prueba (no sube ni avanza): si/no", required: false, default: "no" }
+      de_nuevo: { description: "Otra pasada completa (si ya terminó): si/no", required: false, default: "no" }
 concurrency:
   group: portadas-05
   cancel-in-progress: false
@@ -38,7 +39,7 @@ jobs:
         run: which ffmpeg || timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null || (timeout 300 sudo apt-get update -qq && timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null)
       - name: Portadas 0,5 s
         id: regenerar
-        run: node portadas-05.mjs --max ${{ inputs.max || '3000' }} --a-la-vez ${{ inputs.a_la_vez || '4' }} --pausa 150 --minutos 100 ${{ inputs.prueba == 'si' && '--prueba' || '' }} || true
+        run: node portadas-05.mjs --max ${{ inputs.max || '3000' }} --a-la-vez ${{ inputs.a_la_vez || '4' }} --pausa 150 --minutos 100 ${{ inputs.prueba == 'si' && '--prueba' || '' }} ${{ inputs.de_nuevo == 'si' && '--de-nuevo' || '' }} || true
   seguir:
     needs: portadas
     if: always() && needs.portadas.outputs.quedan != '' && needs.portadas.outputs.quedan != '0' && vars.PORTADAS_05 != 'apagado'

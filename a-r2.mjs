@@ -233,6 +233,26 @@ async function copiarDeHostinger(nombre, items, pausaMs) {
   return items.length - est.copiados - est.faltan_en_hostinger;
 }
 
+// ---------- 0) Videos ya copiados en Hostinger (primero: es lo que el feed espera) ----------
+if (TOPE.videos > 0) {
+  const enR2 = await listarR2("videos-ig/");
+  // 12/11 (medido en el iPhone del dueño): el 56 % de los videos copiados no estaba en R2 y el Worker probaba Hostinger
+  // (~0,9 s, muchas veces 429 → 302): esos videos llegaban sin nada bajado. Van PRIMERO (antes que portadas y fotos) y
+  // por lo que más se ve: elegidos de locales S, A, B, C; después el resto.
+  const filas = await consultar(
+    `SELECT v.url, v.bytes FROM videos_copia v LEFT JOIN locales_prioridad lp ON lp.restaurante_id = v.restaurante_id
+     WHERE v.url LIKE ?
+     ORDER BY (v.publicacion_id IN (SELECT publicacion_id FROM videos_elegidos)) DESC,
+              CASE coalesce(lp.nivel, 'C') WHEN 'S' THEN 0 WHEN 'A' THEN 1 WHEN 'B' THEN 2 ELSE 3 END, v.copiado_en DESC`,
+    [`${ORIGEN}videos-ig/%`],
+  );
+  const items = filas.map((f) => ({ k: clave(f.url), b: Number(f.bytes) })).filter((x) => x.k && enR2.get(x.k) !== x.b);
+  const gbFaltan = items.reduce((s, x) => s + (x.b || 0), 0) / 1e9;
+  console.log(`Videos (Hostinger): en R2 ${enR2.size}, faltan ${items.length} (~${gbFaltan.toFixed(1)} GB) de ${filas.length} · tope ${TOPE.videos}${NOCHE ? " (noche)" : ""}`);
+  quedan += Math.max(0, items.length - TOPE.videos);
+  quedan += await copiarDeHostinger("videos", items.slice(0, TOPE.videos), Math.max(H_PAUSA, 200));
+}
+
 // ---------- 1) Portadas ----------
 if (TOPE.portadas > 0) {
   const enR2 = await listarR2("portadas-ig/");
@@ -255,17 +275,6 @@ if (TOPE.fotos > 0 && quedaTiempo()) {
   console.log(`Fotos IG (Hostinger): en R2 ${enR2.size}, faltan ${items.length} (de ${ks.length})`);
   quedan += Math.max(0, items.length - TOPE.fotos);
   quedan += await copiarDeHostinger("fotos", items.slice(0, TOPE.fotos), H_PAUSA);
-}
-
-// ---------- 3) Videos ya copiados en Hostinger ----------
-if (TOPE.videos > 0 && quedaTiempo()) {
-  const enR2 = await listarR2("videos-ig/");
-  const filas = await consultar("SELECT url, bytes FROM videos_copia WHERE url LIKE ? ORDER BY copiado_en DESC", [`${ORIGEN}videos-ig/%`]);
-  const items = filas.map((f) => ({ k: clave(f.url), b: Number(f.bytes) })).filter((x) => x.k && enR2.get(x.k) !== x.b);
-  const gbFaltan = items.reduce((s, x) => s + (x.b || 0), 0) / 1e9;
-  console.log(`Videos (Hostinger): en R2 ${enR2.size}, faltan ${items.length} (~${gbFaltan.toFixed(1)} GB) de ${filas.length} · tope ${TOPE.videos}${NOCHE ? " (noche)" : ""}`);
-  quedan += Math.max(0, items.length - TOPE.videos);
-  quedan += await copiarDeHostinger("videos", items.slice(0, TOPE.videos), Math.max(H_PAUSA, 200));
 }
 
 // ---------- 4) Directos de Instagram → R2 ----------

@@ -89,10 +89,35 @@ async function subirR2(k, cuerpo) {
   }
 }
 
+// ---------- Videos que ya están en R2 ----------
+// Sólo esos (12/11): los demás salen de Hostinger por el Worker, que con 429 hace esperar a los teléfonos. Los que faltan
+// quedan contados («sin_r2») y se hacen en otra pasada (--de-nuevo) cuando a-r2 los haya copiado.
+async function listarR2(prefijo) {
+  const m = new Set();
+  let cursor = "";
+  for (;;) {
+    const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/r2/buckets/${BUCKET}/objects?per_page=1000&prefix=${prefijo}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, {
+      headers: { authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}` },
+      signal: AbortSignal.timeout(60_000),
+    });
+    const j = await r.json();
+    if (!j.success) throw new Error(`listar R2: ${j.errors?.map((e) => e.message).join("; ")}`);
+    for (const o of j.result ?? []) m.add(o.key);
+    cursor = j.result_info?.cursor ?? "";
+    if (!cursor || String(j.result_info?.is_truncated) === "false") break;
+  }
+  return m;
+}
+const videosEnR2 = await listarR2("videos-ig/");
+
 // ---------- Avance ----------
 const previo = (await d1("SELECT valor FROM ia_config WHERE clave = ?", [CLAVE_AVANCE]))[0];
 const av = previo ? JSON.parse(previo.valor) : { desde: "", revisadas: 0, iguales: 0, casi: 0, distintas: 0, faltaban: 0, sin_video: 0, errores: 0, empezado: new Date().toISOString() };
-if (av.terminado && !process.argv.includes("--de-nuevo")) {
+if (process.argv.includes("--de-nuevo") && av.terminado) {
+  // Otra pasada completa (los que estaban sólo en Hostinger ya pasaron a R2): los iguales se saltean sin subir.
+  Object.assign(av, { desde: "", revisadas: 0, iguales: 0, casi: 0, distintas: 0, faltaban: 0, sin_video: 0, sin_r2: 0, errores: 0, terminado: null, pasada: (av.pasada ?? 1) + 1 });
+}
+if (av.terminado) {
   console.log(`Ya terminado (${JSON.stringify(av)}). Para repetir: --de-nuevo.`);
   if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, "quedan=0\n");
   process.exit(0);
@@ -112,6 +137,10 @@ async function uno(f) {
   const archivo = String(f.url).split("/videos-ig/")[1]?.split("?")[0];
   if (!archivo) {
     av.sin_video++;
+    return;
+  }
+  if (!videosEnR2.has(`videos-ig/${archivo}`)) {
+    av.sin_r2 = (av.sin_r2 ?? 0) + 1;
     return;
   }
   let nuevas;
@@ -169,7 +198,7 @@ let hasta = -1;
 while (hasta + 1 < listos.length && listos[hasta + 1]) hasta++;
 if (hasta >= 0 && !PRUEBA) av.desde = String(lista[hasta].id);
 const quedan = corte.startsWith("3 errores") ? 0 : Number((await d1("SELECT count(*) AS n FROM videos_copia WHERE publicacion_id > ?", [av.desde ?? ""]))[0].n);
-if (!PRUEBA && quedan === 0 && !corte) av.terminado = new Date().toISOString();
+if (!PRUEBA && quedan === 0 && !corte) av.terminado = new Date().toISOString(); // con sin_r2 > 0: repetir con --de-nuevo
 av.corte = corte || null;
 if (!PRUEBA)
   await d1("INSERT INTO ia_config (clave, valor, actualizado_en) VALUES (?, ?, ?) ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor, actualizado_en = excluded.actualizado_en", [
@@ -177,7 +206,7 @@ if (!PRUEBA)
     JSON.stringify(av),
     new Date().toISOString(),
   ]);
-const resumen = `Portadas 0,5 s: revisadas ${av.revisadas}/${total} · iguales ${av.iguales} · casi iguales ${av.casi} · DISTINTAS ${av.distintas} · faltaban ${av.faltaban} · sin video ${av.sin_video} · errores ${av.errores} · quedan ${quedan}${corte ? ` · corte: ${corte}` : ""} (${Math.round((Date.now() - t0) / 60000)} min)`;
+const resumen = `Portadas 0,5 s: revisadas ${av.revisadas}/${total} · iguales ${av.iguales} · casi iguales ${av.casi} · DISTINTAS ${av.distintas} · faltaban ${av.faltaban} · sin video ${av.sin_video} · todavía no en R2 ${av.sin_r2 ?? 0} · errores ${av.errores} · quedan ${quedan}${corte ? ` · corte: ${corte}` : ""} (${Math.round((Date.now() - t0) / 60000)} min)`;
 console.log(resumen);
 if (ejemplos.length) console.log(`  ejemplos de distintas: ${ejemplos.join(", ")}`);
 if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${resumen}\n`);
