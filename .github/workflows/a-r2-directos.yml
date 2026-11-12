@@ -2,7 +2,7 @@
 # Instagram que todavía apuntan al CDN de Instagram, los que vencen antes primero; lo que ya está en R2 se re-apunta
 # (recupera vencidos). 4 máquinas × 3 descargas a la vez (el límite es el 429 de Instagram: si aparece, esa parte frena).
 # Corre en cadena: al terminar espera 15 min y se vuelve a lanzar (lo nuevo de anonyig/Meta queda a salvo en < 1 h).
-# Schedule cada hora de respaldo. Apagar la cadena: variable del repo A_R2_CONTINUO = 0. Sale siempre con 0.
+# Schedule cada hora de respaldo. Apagar la cadena: variable del repo A_R2_CONTINUO = apagado. Sale siempre con 0.
 name: a-r2-directos
 on:
   schedule:
@@ -42,7 +42,7 @@ jobs:
         run: node a-r2.mjs --directos ${{ inputs.directos || '3000' }} --partes 4 --parte ${{ matrix.parte }} --a-la-vez ${{ inputs.a_la_vez || '3' }} ${{ matrix.parte == 0 && '--recuperar' || '' }} --minutos 55 || true
   seguir:
     needs: directos
-    if: always() && vars.A_R2_CONTINUO != '0'
+    if: always() && vars.A_R2_CONTINUO != 'apagado'
     runs-on: ubuntu-latest
     steps:
       - run: sleep 900 && gh workflow run a-r2-directos.yml -R ${{ github.repository }}
