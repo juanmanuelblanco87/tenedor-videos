@@ -435,7 +435,12 @@ if (TOPE.directos > 0 && quedaTiempo()) {
       est.videos++;
     } else {
       const tipo = r.headers.get("content-type") ?? "image/jpeg";
-      if (!tipo.startsWith("image/")) throw new Error(`no es imagen: ${tipo}`);
+      if (!tipo.startsWith("image/")) {
+        // 12/11: hay «fotos» cuyo link es un MP4 (publicaciones de video mal tipadas): la app las muestra como imagen, así
+        // que copiarlas no sirve. Se saltean sin contar como error (cortaban la parte a los 3 seguidos).
+        est.fotos_que_son_video = (est.fotos_que_son_video ?? 0) + 1;
+        return;
+      }
       await subirR2(x.k, b, tipo);
       est.mb_subidos += b.length / 1024 ** 2;
       await apuntar(x, b.length);
