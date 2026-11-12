@@ -1,7 +1,7 @@
 # Instagram → R2 (a-r2.mjs --directos, 12/11/2026, dueño: «todo se guarda en nuestros servidores»): videos y fotos de
 # Instagram que todavía apuntan al CDN de Instagram, los que vencen antes primero; lo que ya está en R2 se re-apunta
 # (recupera vencidos). 4 máquinas × 3 descargas a la vez (el límite es el 429 de Instagram: si aparece, esa parte frena).
-# Corre en cadena: al terminar espera 15 min y se vuelve a lanzar (lo nuevo de anonyig/Meta queda a salvo en < 1 h).
+# Corre en cadena: al terminar se vuelve a lanzar (si fue corta, a los 10 min) (lo nuevo de anonyig/Meta queda a salvo en < 1 h).
 # Schedule cada hora de respaldo. Apagar la cadena: variable del repo A_R2_CONTINUO = apagado. Sale siempre con 0.
 name: a-r2-directos
 on:
@@ -48,5 +48,10 @@ jobs:
     if: always() && vars.A_R2_CONTINUO != 'apagado'
     runs-on: ubuntu-latest
     steps:
-      - run: sleep 900 && gh workflow run a-r2-directos.yml -R ${{ github.repository }}
+      # Si la corrida fue corta (poco trabajo o cortó por errores) espera 10 min antes de la siguiente; si fue larga, sigue ya.
+      - run: |
+          ini=$(gh run view ${{ github.run_id }} -R ${{ github.repository }} --json createdAt -q .createdAt)
+          dur=$(( $(date +%s) - $(date -d "$ini" +%s) ))
+          [ "$dur" -lt 1200 ] && sleep 600
+          gh workflow run a-r2-directos.yml -R ${{ github.repository }}
         env: { GH_TOKEN: "${{ github.token }}" }
