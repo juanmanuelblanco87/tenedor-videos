@@ -198,7 +198,17 @@ let hasta = -1;
 while (hasta + 1 < listos.length && listos[hasta + 1]) hasta++;
 if (hasta >= 0 && !PRUEBA) av.desde = String(lista[hasta].id);
 const quedan = corte.startsWith("3 errores") ? 0 : Number((await d1("SELECT count(*) AS n FROM videos_copia WHERE publicacion_id > ?", [av.desde ?? ""]))[0].n);
-if (!PRUEBA && quedan === 0 && !corte) av.terminado = new Date().toISOString(); // con sin_r2 > 0: repetir con --de-nuevo
+let quedanFinal = quedan;
+if (!PRUEBA && quedan === 0 && !corte) {
+  av.terminado = new Date().toISOString();
+  // Quedaron videos que todavía no estaban en R2 (a-r2 los copia primero): otra pasada sola, hasta 3 en total.
+  if ((av.sin_r2 ?? 0) > 0 && (av.pasada ?? 1) < 3) {
+    console.log(`Pasada ${av.pasada ?? 1} terminada con ${av.sin_r2} videos que no estaban en R2: arranca otra.`);
+    av.historial = [...(av.historial ?? []), { pasada: av.pasada ?? 1, revisadas: av.revisadas, iguales: av.iguales, casi: av.casi, distintas: av.distintas, faltaban: av.faltaban, sin_r2: av.sin_r2, errores: av.errores }];
+    Object.assign(av, { desde: "", revisadas: 0, iguales: 0, casi: 0, distintas: 0, faltaban: 0, sin_video: 0, sin_r2: 0, errores: 0, terminado: null, pasada: (av.pasada ?? 1) + 1 });
+    quedanFinal = 1;
+  }
+}
 av.corte = corte || null;
 if (!PRUEBA)
   await d1("INSERT INTO ia_config (clave, valor, actualizado_en) VALUES (?, ?, ?) ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor, actualizado_en = excluded.actualizado_en", [
