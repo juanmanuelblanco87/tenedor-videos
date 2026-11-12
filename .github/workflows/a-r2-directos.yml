@@ -1,0 +1,49 @@
+# Instagram → R2 (a-r2.mjs --directos, 12/11/2026, dueño: «todo se guarda en nuestros servidores»): videos y fotos de
+# Instagram que todavía apuntan al CDN de Instagram, los que vencen antes primero; lo que ya está en R2 se re-apunta
+# (recupera vencidos). 4 máquinas × 3 descargas a la vez (el límite es el 429 de Instagram: si aparece, esa parte frena).
+# Corre en cadena: al terminar espera 15 min y se vuelve a lanzar (lo nuevo de anonyig/Meta queda a salvo en < 1 h).
+# Schedule cada hora de respaldo. Apagar la cadena: variable del repo A_R2_CONTINUO = 0. Sale siempre con 0.
+name: a-r2-directos
+on:
+  schedule:
+    - cron: "40 * * * *"
+  workflow_dispatch:
+    inputs:
+      directos: { description: "Tope por parte", required: false, default: "3000" }
+      a_la_vez: { description: "Descargas a la vez por parte", required: false, default: "3" }
+concurrency:
+  group: a-r2-directos
+  cancel-in-progress: false
+permissions:
+  actions: write
+  contents: read
+jobs:
+  directos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      matrix:
+        parte: [0, 1, 2, 3]
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_APP_ID: ${{ secrets.D1_APP_ID }}
+      HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
+      HOSTINGER_USUARIO: ${{ secrets.HOSTINGER_USUARIO }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: ffmpeg
+        timeout-minutes: 10
+        run: which ffmpeg || timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null || (timeout 300 sudo apt-get update -qq && timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null)
+      - name: Directos de Instagram → R2 (parte ${{ matrix.parte }})
+        run: node a-r2.mjs --directos ${{ inputs.directos || '3000' }} --partes 4 --parte ${{ matrix.parte }} --a-la-vez ${{ inputs.a_la_vez || '3' }} ${{ matrix.parte == 0 && '--recuperar' || '' }} --minutos 55 || true
+  seguir:
+    needs: directos
+    if: always() && vars.A_R2_CONTINUO != '0'
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 900 && gh workflow run a-r2-directos.yml -R ${{ github.repository }}
+        env: { GH_TOKEN: "${{ github.token }}" }
