@@ -49,7 +49,7 @@ const TOPE = {
 };
 const H_A_LA_VEZ = arg("--hostinger-a-la-vez", 1);
 const H_PAUSA = arg("--pausa", 150);
-const IG_A_LA_VEZ = arg("--a-la-vez", 3);
+const IG_A_LA_VEZ_PEDIDO = arg("--a-la-vez", 3);
 const PARTES = arg("--partes", 1);
 const PARTE = arg("--parte", 0);
 const RECUPERAR = process.argv.includes("--recuperar");
@@ -135,6 +135,13 @@ function putS3(k, cuerpo, tipo) {
   const firma = createHmac("sha256", llave).update(aFirmar).digest("hex");
   const { host, ...resto } = h;
   return fetch(url, { method: "PUT", headers: { ...resto, authorization: `AWS4-HMAC-SHA256 Credential=${S3.id}/${alcance}, SignedHeaders=${firmados}, Signature=${firma}` }, body: cuerpo, signal: AbortSignal.timeout(180_000) });
+}
+// Sin claves S3, la copia de Hostinger (no urgente: Hostinger ya sirve esos archivos) no corre, para dejarle el cupo de
+// api.cloudflare.com a los directos (que vencen); y los directos bajan a 2 a la vez por parte.
+if (!S3 && process.argv.includes("--requiere-s3")) {
+  console.log("Faltan las claves S3 de R2 (cargar-secretos-r2.cmd): la copia desde Hostinger espera. Nada que hacer.");
+  if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, "quedan=0\n");
+  process.exit(0);
 }
 async function subirR2(k, cuerpo, tipo) {
   for (let intento = 0; ; intento++) {
@@ -440,7 +447,7 @@ if (TOPE.directos > 0 && quedaTiempo()) {
   let i = 0;
   let seguidos = 0;
   await Promise.all(
-    Array.from({ length: Math.max(1, Math.min(IG_A_LA_VEZ, lista.length)) }, async () => {
+    Array.from({ length: Math.max(1, Math.min(S3 ? IG_A_LA_VEZ_PEDIDO : Math.min(2, IG_A_LA_VEZ_PEDIDO), lista.length)) }, async () => {
       while (i < lista.length && !est.corte && quedaTiempo()) {
         const x = lista[i++];
         try {
