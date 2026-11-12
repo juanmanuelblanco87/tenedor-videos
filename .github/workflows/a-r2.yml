@@ -1,0 +1,46 @@
+# Copia de medios a Cloudflare R2 (a-r2.mjs, 12/11/2026, dueño: «aplicá los arreglos de velocidad»). Cada 2 h, tandas
+# con tope. Job «hostinger»: portadas → fotos de IG → videos ya copiados, de a uno contra Hostinger (frena ante 429/503,
+# corta a los 3 errores seguidos; de 00 a 08 h ARG los videos van ×3). Job «directos»: elegidos visibles cuyo video
+# sigue siendo el link de Instagram → achicados a R2 + videos_copia (los vencidos quedan para anonyig).
+# Sale siempre con 0 (sin mails de GitHub). workflow_dispatch: topes a mano (0 = saltear esa fase).
+name: a-r2
+on:
+  # schedule:
+  #   - cron: "10 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      portadas: { description: "Tope de portadas", required: false, default: "4000" }
+      fotos: { description: "Tope de fotos de IG", required: false, default: "3000" }
+      videos: { description: "Tope de videos (×3 de noche)", required: false, default: "600" }
+      directos: { description: "Tope de directos de Instagram", required: false, default: "300" }
+concurrency:
+  group: a-r2
+  cancel-in-progress: false
+env:
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  D1_APP_ID: ${{ secrets.D1_APP_ID }}
+  HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
+  HOSTINGER_USUARIO: ${{ secrets.HOSTINGER_USUARIO }}
+jobs:
+  hostinger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Hostinger → R2
+        run: node a-r2.mjs --portadas ${{ inputs.portadas || '4000' }} --fotos ${{ inputs.fotos || '3000' }} --videos ${{ inputs.videos || '600' }} --noche-x 3 --minutos 100 || true
+  directos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: ffmpeg
+        timeout-minutes: 10
+        run: which ffmpeg || timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null || (timeout 300 sudo apt-get update -qq && timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null)
+      - name: Directos de Instagram → R2
+        run: node a-r2.mjs --directos ${{ inputs.directos || '300' }} --minutos 95 || true

@@ -184,7 +184,8 @@ const est = { copiados: 0, sinLink: 0, grandes: 0, errores: 0, mbAntes: 0, mbDes
 // ocupar total − otros; al llegar, no se copia más (el revisor libera lugar ocultando videos; el borrado lo hace infra).
 const topeFila = (await d1(env.D1_APP_ID, "SELECT valor FROM ia_config WHERE clave = 'hostinger_tope'"))[0];
 const topeDisco = topeFila ? JSON.parse(String(topeFila.valor)) : { total_gb: 45, otros_gb: 12 };
-const usados = Number((await d1(env.D1_APP_ID, "SELECT coalesce(sum(bytes),0) AS b FROM videos_copia"))[0]?.b ?? 0);
+// 12/11: sólo lo que está en Hostinger (los directos copiados a R2 por a-r2.mjs no ocupan su disco).
+const usados = Number((await d1(env.D1_APP_ID, "SELECT coalesce(sum(bytes),0) AS b FROM videos_copia WHERE url LIKE ?", [`https://${DOMINIO}/%`]))[0]?.b ?? 0);
 let libres = (Number(topeDisco.total_gb) - Number(topeDisco.otros_gb)) * 1e9 - usados;
 console.log(`Disco Hostinger: videos ${(usados / 1e9).toFixed(1)} GB · tope para videos ${Number(topeDisco.total_gb) - Number(topeDisco.otros_gb)} GB · libres ${(libres / 1e9).toFixed(1)} GB`);
 if (libres <= 0) {
