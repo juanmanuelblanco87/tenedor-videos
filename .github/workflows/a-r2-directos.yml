@@ -1,6 +1,6 @@
 # Instagram → R2 (a-r2.mjs --directos, 12/11/2026, dueño: «todo se guarda en nuestros servidores»): videos y fotos de
 # Instagram que todavía apuntan al CDN de Instagram, los que vencen antes primero; lo que ya está en R2 se re-apunta
-# (recupera vencidos). 4 máquinas × 3 descargas a la vez (el límite es el 429 de Instagram: si aparece, esa parte frena).
+# (recupera vencidos). 4 máquinas × 4 descargas a la vez (el límite es el 429 de Instagram: si aparece, esa parte frena).
 # Corre en cadena: al terminar se vuelve a lanzar (si fue corta, a los 10 min) (lo nuevo de anonyig/Meta queda a salvo en < 1 h).
 # Schedule cada hora de respaldo. Apagar la cadena: variable del repo A_R2_CONTINUO = apagado. Sale siempre con 0.
 name: a-r2-directos
@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       directos: { description: "Tope por parte", required: false, default: "3000" }
-      a_la_vez: { description: "Descargas a la vez por parte", required: false, default: "3" }
+      a_la_vez: { description: "Descargas a la vez por parte", required: false, default: "4" }
 concurrency:
   group: a-r2-directos
   cancel-in-progress: false
@@ -42,7 +42,7 @@ jobs:
         timeout-minutes: 10
         run: which ffmpeg || timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null || (timeout 300 sudo apt-get update -qq && timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null)
       - name: Directos de Instagram → R2 (parte ${{ matrix.parte }})
-        run: node a-r2.mjs --directos ${{ inputs.directos || '3000' }} --partes 4 --parte ${{ matrix.parte }} --a-la-vez ${{ inputs.a_la_vez || '3' }} ${{ matrix.parte == 0 && '--recuperar' || '' }} --minutos 55 || true
+        run: node a-r2.mjs --directos ${{ inputs.directos || '3000' }} --partes 4 --parte ${{ matrix.parte }} --a-la-vez ${{ inputs.a_la_vez || '4' }} ${{ matrix.parte == 0 && '--recuperar' || '' }} --minutos 55 || true
   seguir:
     needs: directos
     if: always() && vars.A_R2_CONTINUO != 'apagado'

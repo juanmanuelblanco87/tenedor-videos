@@ -11,7 +11,7 @@ on:
       portadas: { description: "Tope de portadas", required: false, default: "20000" }
       fotos: { description: "Tope de fotos de IG", required: false, default: "8000" }
       videos: { description: "Tope de videos (×2 de noche)", required: false, default: "3000" }
-      a_la_vez: { description: "Pedidos a la vez contra Hostinger", required: false, default: "2" }
+      a_la_vez: { description: "Pedidos a la vez contra Hostinger", required: false, default: "3" }
 concurrency:
   group: a-r2
   cancel-in-progress: false
@@ -37,7 +37,7 @@ jobs:
         with: { node-version: 22 }
       - name: Hostinger → R2
         id: copia
-        run: node a-r2.mjs --portadas ${{ inputs.portadas || '20000' }} --fotos ${{ inputs.fotos || '8000' }} --videos ${{ inputs.videos || '3000' }} --noche-x 2 --hostinger-a-la-vez ${{ inputs.a_la_vez || '2' }} --pausa 100 --minutos 100 --requiere-s3 || true
+        run: node a-r2.mjs --portadas ${{ inputs.portadas || '20000' }} --fotos ${{ inputs.fotos || '8000' }} --videos ${{ inputs.videos || '3000' }} --noche-x 2 --hostinger-a-la-vez ${{ inputs.a_la_vez || '3' }} --pausa 100 --minutos 100 --requiere-s3 || true
   seguir:
     needs: hostinger
     if: always() && needs.hostinger.outputs.quedan != '' && needs.hostinger.outputs.quedan != '0' && vars.A_R2_CONTINUO != 'apagado'
