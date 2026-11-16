@@ -1,6 +1,6 @@
 # Miniaturas de 160 px en R2 (miniaturas.mjs, 15/11/2026): una chica al lado de cada foto de fotos-ig/ y fotos-gm/, y
 # rehace las portadas chicas que eran grandes. Saltea lo ya hecho. Corre acá (repo público, minutos sin tope) porque el
-# repo privado se quedó sin minutos. GitHub no dispara los schedule de este repo: se lanza a mano (gh workflow run).
+# repo privado se quedó sin minutos. Corre sola todos los días 04:30 AR (schedule; a mano: gh workflow run miniaturas.yml).
 name: miniaturas
 on:
   schedule:
