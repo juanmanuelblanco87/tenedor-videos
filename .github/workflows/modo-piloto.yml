@@ -1,0 +1,105 @@
+# Piloto MODO (16/11/2026, PRUEBA INTERNA, no publica nada): lee las promos de gastronomía de modo.com.ar/promos
+# respetando robots.txt y 1 pedido cada 2 s, y mide cuántas se emparejan con nuestros locales (lectura única y liviana
+# de la D1, sin escribir). Cuatro partes en fila (nunca en paralelo: es un solo sitio) y al final el emparejamiento.
+# Los resultados salen CIFRADOS como artifact (el repo es público): se abren en la PC con
+#   node modo-piloto.mjs descifrar --clave <privada> --entrada resultados.enc --salida <carpeta>
+# Sólo a mano: gh workflow run modo-piloto.yml -R juanmanuelblanco87/tenedor-videos
+name: modo-piloto
+on:
+  workflow_dispatch:
+    inputs:
+      solo_emparejar_de_run:
+        description: "Run anterior del que reusar la lectura (vacío = leer todo)"
+        required: false
+        default: ""
+concurrency:
+  group: modo-piloto
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: read
+env:
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+jobs:
+  leer-1:
+    if: ${{ inputs.solo_emparejar_de_run == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: node modo-piloto.mjs leer --parte 1 --partes 4 --previos prev --salida salida
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: modo-parte-1, path: salida/, retention-days: 30 }
+  leer-2:
+    needs: leer-1
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/download-artifact@v4
+        with: { pattern: modo-parte-*, path: prev }
+      - run: node modo-piloto.mjs leer --parte 2 --partes 4 --previos prev --salida salida
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: modo-parte-2, path: salida/, retention-days: 30 }
+  leer-3:
+    needs: leer-2
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/download-artifact@v4
+        with: { pattern: modo-parte-*, path: prev }
+      - run: node modo-piloto.mjs leer --parte 3 --partes 4 --previos prev --salida salida
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: modo-parte-3, path: salida/, retention-days: 30 }
+  leer-4:
+    needs: leer-3
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/download-artifact@v4
+        with: { pattern: modo-parte-*, path: prev }
+      - run: node modo-piloto.mjs leer --parte 4 --partes 4 --previos prev --salida salida
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: modo-parte-4, path: salida/, retention-days: 30 }
+  emparejar:
+    needs: [leer-1, leer-2, leer-3, leer-4]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 460
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_APP_ID: ${{ secrets.D1_APP_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: modo-parte-*
+          path: prev
+          run-id: ${{ inputs.solo_emparejar_de_run || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Esperar la noche (la D1 de producción se lee desde las 22 AR)
+        run: |
+          h=$(TZ=America/Argentina/Buenos_Aires date +%H)
+          if [ "$h" -ge 7 ] && [ "$h" -lt 22 ]; then
+            falta=$(( ( $(TZ=America/Argentina/Buenos_Aires date -d 'today 22:00' +%s) - $(date +%s) ) ))
+            [ "$falta" -gt 0 ] && [ "$falta" -lt 25000 ] && sleep "$falta" || true
+          fi
+      - run: node modo-piloto.mjs emparejar --previos prev --salida salida
+      - uses: actions/upload-artifact@v4
+        with: { name: modo-resultados, path: salida/, retention-days: 30 }
