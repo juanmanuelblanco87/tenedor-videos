@@ -1,0 +1,27 @@
+# Miniaturas de 160 px en R2 (miniaturas.mjs, 15/11/2026): una chica al lado de cada foto de fotos-ig/ y fotos-gm/, y
+# rehace las portadas chicas que eran grandes. Saltea lo ya hecho. Corre acá (repo público, minutos sin tope) porque el
+# repo privado se quedó sin minutos. GitHub no dispara los schedule de este repo: se lanza a mano (gh workflow run).
+name: miniaturas
+on:
+  schedule:
+    - cron: "30 7 * * *"
+  workflow_dispatch:
+    inputs:
+      max: { description: "Tope (0 = todas)", required: false, default: "0" }
+concurrency:
+  group: miniaturas
+  cancel-in-progress: false
+jobs:
+  miniaturas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm i --no-save --no-audit --no-fund sharp@0.34
+      - name: Miniaturas
+        run: node miniaturas.mjs --paralelo 12 --max "${{ inputs.max || '0' }}"
