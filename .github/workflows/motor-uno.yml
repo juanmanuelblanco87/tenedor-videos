@@ -18,6 +18,9 @@ jobs:
       D1_FONDO_ID: ${{ secrets.D1_FONDO_ID }}
       HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
       HOSTINGER_USUARIO: ${{ secrets.HOSTINGER_USUARIO }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -28,4 +31,4 @@ jobs:
           which ffmpeg || timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null || (timeout 300 sudo apt-get update -qq && timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null)
           pip install -q -U yt-dlp
       - name: Copiar las publicaciones pedidas
-        run: node motor.mjs --partes 1 --parte 0 --minutos 15 --a-la-vez 1 --por-local 6 --ids "${{ inputs.ids }}"
+        run: node motor.mjs --partes 1 --parte 0 --minutos 15 --a-la-vez 1 --por-local 6 --ids "${{ inputs.ids }}" --r2

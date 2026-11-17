@@ -9,6 +9,7 @@ import { execFile } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash, createHmac } from "node:crypto";
 import { promisify } from "node:util";
 import { portadaDeVideo } from "./portada.mjs";
 
@@ -54,7 +55,37 @@ async function d1(base, sql, params = [], intento = 0) {
 
 // ---------- Hostinger (API de archivos, TUS) ----------
 let sesion = null;
+// --r2 (17/11): sube a R2 (bucket tenedor-media, servido por media.tenedor.com.ar) por la API S3, con la misma firma que
+// a-r2.mjs, en vez de Hostinger (disco casi lleno y upload-urls dando 502). Requiere R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY /
+// R2_ENDPOINT.
+const A_R2 = process.argv.includes("--r2");
+async function subirR2(nombre, contenido) {
+  const S3 = { id: process.env.R2_ACCESS_KEY_ID, secreto: process.env.R2_SECRET_ACCESS_KEY, base: String(process.env.R2_ENDPOINT ?? "").replace(/\/$/, "") };
+  if (!S3.id || !S3.secreto || !S3.base) throw new Error("--r2 sin claves S3 de R2");
+  const tipo = nombre.endsWith(".mp4") ? "video/mp4" : "image/jpeg";
+  const cod = (x) => encodeURIComponent(x).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  const hmac = (k, d) => createHmac("sha256", k).update(d).digest();
+  const sha = (d) => createHash("sha256").update(d).digest("hex");
+  for (let intento = 0; ; intento++) {
+    const url = new URL(`${S3.base}/tenedor-media/${nombre.split("/").map(cod).join("/")}`);
+    const fecha = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+    const dia = fecha.slice(0, 8);
+    const h = { "content-type": tipo, host: url.host, "x-amz-content-sha256": "UNSIGNED-PAYLOAD", "x-amz-date": fecha };
+    const firmados = Object.keys(h).sort().join(";");
+    const canonico = ["PUT", url.pathname, "", ...Object.keys(h).sort().map((x) => `${x}:${h[x]}`), "", firmados, "UNSIGNED-PAYLOAD"].join("\n");
+    const alcance = `${dia}/auto/s3/aws4_request`;
+    const llave = hmac(hmac(hmac(hmac(`AWS4${S3.secreto}`, dia), "auto"), "s3"), "aws4_request");
+    const firma = createHmac("sha256", llave).update(["AWS4-HMAC-SHA256", fecha, alcance, sha(canonico)].join("\n")).digest("hex");
+    const { host, ...resto } = h;
+    const r = await fetch(url, { method: "PUT", headers: { ...resto, authorization: `AWS4-HMAC-SHA256 Credential=${S3.id}/${alcance}, SignedHeaders=${firmados}, Signature=${firma}` }, body: new Uint8Array(contenido), signal: AbortSignal.timeout(180_000) }).catch((e) => ({ ok: false, status: String(e?.name ?? e) }));
+    if (r.ok) return `https://media.tenedor.com.ar/${nombre}`;
+    if (intento >= 3) throw new Error(`R2 ${r.status}`);
+    await new Promise((ok) => setTimeout(ok, 3_000 * (intento + 1)));
+  }
+}
+
 async function subir(nombre, contenido, reintento = false) {
+  if (A_R2) return subirR2(nombre, contenido);
   // 09/11: la API de Hostinger (upload-urls) falla de a ratos con 500; reintenta con espera creciente antes de rendirse.
   for (let intento = 0; !sesion; intento++) {
     const r = await fetch("https://developers.hostinger.com/api/hosting/v1/files/upload-urls", {
