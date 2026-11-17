@@ -370,7 +370,8 @@ function emparejarUno(nombrePromo, textoUbic, idx) {
   if (compacto(nuc).length >= 5) suma(idx.nucleo.get(nuc), "nucleo");
   const cands = [...porId.values()];
   if (!cands.length) return { clase: "sin_emparejar", nombre: n, nucleo: nuc };
-  const ubic = ` ${norm(textoUbic)} `;
+  // El nombre del comercio no cuenta como ubicación («Café Martínez» no prueba que esté en Martínez).
+  const ubic = [norm(nombrePromo), n].reduce((t, x) => (x ? t.split(` ${x} `).join(" ") : t), ` ${norm(textoUbic)} `);
   const enTexto = (s) => { const x = norm(s); return x.length >= 4 && !/^(centro|capital|norte|sur|este|oeste)$/.test(x) && ubic.includes(` ${x} `); };
   const conUbic = cands.filter(({ l }) => enTexto(l.barrio) || enTexto(l.ciudad));
   const fuertes = cands.filter((c) => c.tipo !== "nucleo");
@@ -414,7 +415,7 @@ async function emparejar() {
   const filas = [];
   for (const p of gastroVig) {
     const nombres = String(p.comercio || p.titulo).split(/\s*[;|\/]\s*|\s*,\s*/).filter(Boolean).slice(0, 10);
-    const textoUbic = [p.titulo, p.descripcion, p.cuerpo, p.legales, p.comercio].join(" ");
+    const textoUbic = [p.titulo, p.descripcion, p.cuerpo, p.legales].join(" ");
     const res = nombres.map((n) => emparejarUno(n, textoUbic, idx));
     const orden = { segura: 0, dudosa: 1, sin_emparejar: 2, generica: 3 };
     const mejor = res.sort((a, b) => orden[a.clase] - orden[b.clase])[0];
