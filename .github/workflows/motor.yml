@@ -11,6 +11,9 @@ on:
       max:
         description: "Tope de videos por parte (vacío = todos los que entren en el tiempo)"
         required: false
+      ids:
+        description: "Sólo estas publicaciones (ids separados por coma)"
+        required: false
 concurrency:
   group: motor
   cancel-in-progress: false
@@ -42,4 +45,4 @@ jobs:
           pip install -q -U yt-dlp
           ffmpeg -version | head -1
       - name: Videos vencidos con link nuevo (parte ${{ matrix.parte }})
-        run: node motor.mjs --partes 4 --parte ${{ matrix.parte }} --minutos 165 --a-la-vez 2 --por-local 2 ${{ inputs.max && format('--max {0}', inputs.max) || '' }}
+        run: node motor.mjs --partes 4 --parte ${{ matrix.parte }} --minutos 165 --a-la-vez 2 --por-local 2 ${{ inputs.max && format('--max {0}', inputs.max) || '' }} ${{ inputs.ids && format('--ids {0}', inputs.ids) || '' }}

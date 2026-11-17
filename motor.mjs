@@ -127,7 +127,10 @@ const ultimoCorte = corte ? Date.parse(JSON.parse(String(corte.valor)).en ?? "")
 // --solo-directos (09/11): sólo los elegidos con link directo vigente (anonyig). No le pide nada a Instagram, así que no
 // espera por bloqueos ni marca cortes; corre seguido (copiar-directos.yml).
 const SOLO_DIRECTOS = process.argv.includes("--solo-directos");
-if (!SOLO_DIRECTOS && Number.isFinite(ultimoCorte) && Date.now() - ultimoCorte < ESPERA_CORTE_MIN * 60_000) {
+// --ids a,b (17/11, dueño: «descargalo con nuestra herramienta»): sólo esas publicaciones (un reel cargado a mano para un
+// comercio). No espera cortes ni topes de nivel; respeta el tope de disco.
+const IDS = new Set((process.argv[process.argv.indexOf("--ids") + 1] && process.argv.includes("--ids") ? process.argv[process.argv.indexOf("--ids") + 1] : "").split(",").map((x) => x.trim()).filter(Boolean));
+if (!SOLO_DIRECTOS && !IDS.size && Number.isFinite(ultimoCorte) && Date.now() - ultimoCorte < ESPERA_CORTE_MIN * 60_000) {
   console.log(`Parte ${PARTE + 1}/${PARTES}: cortó por bloqueo hace ${Math.round((Date.now() - ultimoCorte) / 60000)} min; espera ${ESPERA_CORTE_MIN} min. Nada que hacer.`);
   process.exit(0);
 }
@@ -165,7 +168,8 @@ const copiasDe = new Map((await d1(env.D1_APP_ID, "SELECT c.restaurante_id, coun
 const hash = (s) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
 const porLocal = new Map();
 const elegibles = filas
-  .filter((x) => !pendientesMeta.has(String(x.restaurante_id)))
+  .filter((x) => !IDS.size || IDS.has(String(x.id)))
+  .filter((x) => IDS.size || !pendientesMeta.has(String(x.restaurante_id)))
   .filter((x) => hash(String(x.restaurante_id)) % PARTES === PARTE)
   // dentro de cada comercio, los elegidos primero (son los que muestra la app)
   .sort((a, b) => Number(b.eleg) - Number(a.eleg))
@@ -174,7 +178,7 @@ const elegibles = filas
     porLocal.set(k, (porLocal.get(k) ?? 0) + 1);
     return { ...x, n: porLocal.get(k) + (copiasDe.get(k) ?? 0) };
   })
-  .filter((x) => x.n <= tope(x.nivel, String(x.restaurante_id)))
+  .filter((x) => IDS.size || x.n <= tope(x.nivel, String(x.restaurante_id)))
   .filter((x) => !SOLO_A_MAS || aMas.has(String(x.restaurante_id)));
 const cola = [...elegibles.filter((x) => x.n === 1), ...elegibles.filter((x) => x.n > 1 && Number(x.eleg) === 1), ...elegibles.filter((x) => x.n > 1 && Number(x.eleg) !== 1)].slice(0, MAX);
 console.log(`Videos vencidos sin copia: ${filas.length} · parte ${PARTE + 1}/${PARTES}: ${cola.length} (${elegibles.filter((x) => x.n === 1).length} de comercios sin ningún video primero; hasta ${POR_LOCAL} por comercio, de a ${A_LA_VEZ}, ${MINUTOS} min)`);
