@@ -1,0 +1,37 @@
+# Revisor de seguridad, PASO 0 (18/11/2026): velocidad y calibración de filtros gratuitos (NudeNet y CLIP zero-shot)
+# sobre una muestra real. Sólo LEE la base. R4: el log lleva sólo contadores, tiempos e ids opacos; sin artefactos.
+name: seguridad-paso0
+on:
+  workflow_dispatch:
+    inputs:
+      videos: { description: "videos de la muestra", default: "300" }
+      fotos: { description: "fotos de la muestra", default: "300" }
+      clip: { description: "modelos CLIP (arq:pesos, separados por coma)", default: "ViT-B-32:laion2b_s34b_b79k,ViT-L-14:laion2b_s32b_b82k" }
+concurrency: { group: seguridad-paso0, cancel-in-progress: false }
+permissions: { contents: read }
+jobs:
+  medir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: ffmpeg
+        run: |
+          which ffmpeg && exit 0
+          for i in 1 2 3; do
+            timeout 300 sudo apt-get update -qq && timeout 420 sudo apt-get install -y -qq ffmpeg >/dev/null && break
+            sleep 20
+          done
+          ffmpeg -version | head -1
+      - name: Dependencias (CPU)
+        run: |
+          pip install -q torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -q open_clip_torch nudenet pillow
+      - run: nproc && free -g
+      - run: python seguridad-paso0.py --videos "${{ inputs.videos }}" --fotos "${{ inputs.fotos }}" --clip "${{ inputs.clip }}"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_APP_ID: ${{ secrets.D1_APP_ID }}
