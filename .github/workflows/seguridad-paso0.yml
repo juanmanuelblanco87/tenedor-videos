@@ -6,7 +6,7 @@ on:
     inputs:
       videos: { description: "videos de la muestra", default: "300" }
       fotos: { description: "fotos de la muestra", default: "300" }
-      clip: { description: "modelos CLIP (arq:pesos, separados por coma)", default: "ViT-B-32:laion2b_s34b_b79k,ViT-L-14:laion2b_s32b_b82k" }
+      clip: { description: "modelos CLIP (arq:pesos, separados por coma)", default: "ViT-B-32:laion2b_s34b_b79k,ViT-B-16:laion2b_s34b_b88k" }
 concurrency: { group: seguridad-paso0, cancel-in-progress: false }
 permissions: { contents: read }
 jobs:

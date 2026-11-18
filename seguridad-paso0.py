@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 ap = argparse.ArgumentParser()
 ap.add_argument("--videos", type=int, default=300)
 ap.add_argument("--fotos", type=int, default=300)
-ap.add_argument("--clip", default="ViT-B-32:laion2b_s34b_b79k,ViT-L-14:laion2b_s32b_b82k")
+ap.add_argument("--clip", default="ViT-B-32:laion2b_s34b_b79k,ViT-B-16:laion2b_s34b_b88k")
 args = ap.parse_args()
 
 ENV = os.environ
@@ -132,13 +132,15 @@ idx = {c: i for i, x in enumerate(items) for c in x["cuadros"]}
 UMBRALES = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
 
 
-def calibrar(nombre, puntajes):
+def calibrar(nombre, puntajes, minimo=1):
     """puntajes: {categoria: [puntaje por cuadro, en el orden de `cuadros`]}. Un ítem se marca si CUALQUIER cuadro supera."""
     out = {}
     for cat, ps in puntajes.items():
-        por_item = [0.0] * len(items)
+        por_cuadro = [[] for _ in items]
         for c, p in zip(cuadros, ps):
-            por_item[idx[c]] = max(por_item[idx[c]], p)
+            por_cuadro[idx[c]].append(p)
+        # puntaje del ítem = el «minimo»-ésimo cuadro más alto (1 = el máximo); una foto usa siempre su único cuadro
+        por_item = [sorted(l, reverse=True)[min(minimo, len(l)) - 1] if l else 0.0 for l in por_cuadro]
         fila = {}
         for u in UMBRALES:
             mv = sum(1 for i, x in enumerate(items) if x["tipo"] == "video" and por_item[i] >= u)
@@ -163,12 +165,8 @@ CUBIERTO = {"FEMALE_GENITALIA_COVERED", "FEMALE_BREAST_COVERED", "BUTTOCKS_COVER
 try:
     from nudenet import NudeDetector
 
+    # 18/11, corrida 1: el 640m de la página de versiones no se pudo leer (InvalidProtobuf); queda el 320n que trae el paquete.
     variantes = [("nudenet-320n", {})]
-    try:
-        urllib.request.urlretrieve("https://github.com/notAI-tech/NudeNet/releases/download/v3.4-weights/640m.onnx", "/tmp/640m.onnx")
-        variantes.append(("nudenet-640m", {"model_path": "/tmp/640m.onnx", "inference_resolution": 640}))
-    except Exception as e:
-        log("640m no disponible:", type(e).__name__)
     for nombre, kw in variantes:
         try:
             det = NudeDetector(**kw)
@@ -206,6 +204,11 @@ NEGATIVOS = [
     "a person smiling at the camera", "a glass of beer", "ice cream", "sushi", "a cook in a kitchen", "a coffee cup", "pasta",
     "a woman in a summer dress", "a man without a shirt at the beach", "red wine spilled", "a bloody mary cocktail", "chorizo and sausages on a grill",
     "a promotional flyer", "a live music show at a bar", "a dj at a party", "people dancing at a bar",
+    # 18/11, corrida 2: lo que más marcaba en la corrida 1 eran cuadros de video con gente, noche y texto.
+    "a close-up of a person's face", "hands holding food", "a group of friends at a bar", "a dark nightclub with colored lights",
+    "white text on a colored background", "a woman taking a selfie", "a chef plating food", "a couple at a restaurant table",
+    "flames on a grill", "a city street", "a blurry photo", "a black screen", "a waiter serving a table", "a kitchen with cooks",
+    "a logo", "a person drinking", "a glass of whisky", "a tattooed arm", "a woman in a bikini at a pool",
 ]
 try:
     import torch, open_clip
@@ -236,19 +239,25 @@ try:
             logits = escala * emb @ te.T
             nneg = len(NEGATIVOS)
             neg = logits[:, -nneg:]
-            punt, j = {}, 0
+            npos = logits.shape[1] - nneg
+            conj = logits.softmax(dim=1)  # softmax conjunta: categorías y negativos compiten todos juntos
+            variantes_p = {"binaria": {}, "conjunta": {}}
+            j = 0
             for cat, ps in CATEGORIAS.items():
                 pos = logits[:, j : j + len(ps)]
+                # binaria (corrida 1): las etiquetas de la categoría contra las gastronómicas, sin las otras categorías
+                variantes_p["binaria"][cat] = torch.cat([pos, neg], dim=1).softmax(dim=1)[:, : len(ps)].sum(dim=1).tolist()
+                variantes_p["conjunta"][cat] = conj[:, j : j + len(ps)].sum(dim=1).tolist()
                 j += len(ps)
-                # binario por categoría: probabilidad de las etiquetas de la categoría frente a las gastronómicas
-                todo = torch.cat([pos, neg], dim=1).softmax(dim=1)
-                punt[cat] = todo[:, : len(ps)].sum(dim=1).tolist()
             vel = {"cuadros": len(cuadros), "seg": round(seg, 1), "cuadros_por_min": round(60 * len(cuadros) / seg, 1)}
             log(f"VELOCIDAD {nombre} " + json.dumps(vel))
-            cal = calibrar(nombre, punt)
-            # cualquier categoría (un ítem marcado por al menos una)
-            cual = [max(v) for v in zip(*punt.values())]
-            cal.update(calibrar(nombre + "-cualquiera", {"cualquier_categoria": cual}))
+            cal = {}
+            for var, punt in variantes_p.items():
+                cal[var] = calibrar(f"{nombre}-{var}", punt)
+                cual = [max(v) for v in zip(*punt.values())]
+                cal[var].update(calibrar(f"{nombre}-{var}-cualquiera", {"cualquier_categoria": cual}))
+                # informativo: un video se marca sólo si 2 cuadros o más superan el umbral (una foto, con 1)
+                cal[var + "-2cuadros"] = calibrar(f"{nombre}-{var}-2cuadros", {"cualquier_categoria": cual}, minimo=2)
             resultado["filtros"][nombre] = {"velocidad": vel, "calibracion": cal}
             del modelo
         except Exception as e:
