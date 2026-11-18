@@ -2,10 +2,16 @@
 // de un video buenísimo» y «Ness muestra un video horizontal pero el 2do es vertical»). El archivo dice 9:16, pero:
 //   - «franjas»: es un video horizontal con barras negras arriba y abajo (Ness) → cuenta como apaisado;
 //   - «foto»: es una foto quieta hecha video, unos segundos sin movimiento (JW Bradley) → cuenta como apaisado.
-// En los dos casos pasa a vertical = 0 en videos_elegidos: el feed lo pone al final de la tarjeta (detrás de los reels
-// de verdad y de las fotos). Lee sólo los primeros 8 s del video copiado en Hostinger (no toca Instagram).
+// En los dos casos (y si se ve horizontal) cuenta como NO vertical: el feed lo pone al final de la tarjeta (detrás de los
+// reels de verdad y de las fotos). Lee sólo los primeros 8 s del video copiado en Hostinger (no toca Instagram).
+// 18/11/2026 (motor de videos verticales, paso 2; diseño v3 §V1, Roberto r3): ya NO escribe videos_elegidos (su único
+// escritor es ordenarGuardados, en tenedor/src/lib/seleccion-videos.ts). Guarda el veredicto en video_medida con fuente
+// «contenido» (motivo franjas / foto / horizontal, vertical 0): manda sobre el MP4 9:16, así que el «franjas» ya no
+// vuelve a vertical en la vuelta siguiente de ordenarGuardados (la regresión de antes). Requiere la migración app 0030.
 // Los revisados se anotan en R2 (control/revision-contenido-<parte>.json) para no repetirlos.
-// Uso: node revisar-contenido.mjs [--partes 4 --parte k] [--minutos 45] [--max N] [--simular] [--ids id1,id2]
+// --repasar (C7, recuperar los «foto quieta» que se perdieron): revisa también los ya anotados; no toca la lista de R2.
+// Va en tandas con --max y fuera del horario pico de la app (antecedente de la base saturada del 31/10).
+// Uso: node revisar-contenido.mjs [--partes 4 --parte k] [--minutos 45] [--max N] [--simular] [--repasar] [--ids id1,id2]
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -16,6 +22,7 @@ const arg = (n, def) => {
 };
 const PARTES = Number(arg("--partes", 1)), PARTE = Number(arg("--parte", 0)), MINUTOS = Number(arg("--minutos", 45)), MAX = Number(arg("--max", Infinity));
 const SIMULAR = process.argv.includes("--simular");
+const REPASAR = process.argv.includes("--repasar");
 const IDS = arg("--ids", "")?.split(",").filter(Boolean) ?? [];
 const env = process.env;
 for (const k of ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "D1_APP_ID"]) if (!env[k]) throw new Error(`Falta el secreto ${k}`);
@@ -43,7 +50,7 @@ async function leerHechos() {
   return r.ok ? new Set(await r.json().catch(() => [])) : new Set();
 }
 async function guardarHechos(s) {
-  if (SIMULAR) return;
+  if (SIMULAR || REPASAR) return;
   await fetch(CONTROL, { method: "PUT", headers: { ...aut, "content-type": "application/json" }, body: JSON.stringify([...s]) });
 }
 
@@ -72,7 +79,7 @@ const hechos = await leerHechos();
 const filas = IDS.length
   ? await d1(`SELECT e.publicacion_id id, e.restaurante_id, c.url FROM videos_elegidos e JOIN videos_copia c ON c.publicacion_id = e.publicacion_id WHERE e.publicacion_id IN (SELECT value FROM json_each(?))`, [JSON.stringify(IDS)])
   : await d1(`SELECT e.publicacion_id id, e.restaurante_id, c.url FROM videos_elegidos e JOIN videos_copia c ON c.publicacion_id = e.publicacion_id WHERE e.vertical = 1 AND e.publicacion_id NOT LIKE 'tv-%'`);
-const mias = filas.filter((f) => IDS.length || (hash(f.id) % PARTES === PARTE && !hechos.has(f.id)));
+const mias = filas.filter((f) => IDS.length || (hash(f.id) % PARTES === PARTE && (REPASAR || !hechos.has(f.id))));
 console.log(`Verticales con copia: ${filas.length} · parte ${PARTE + 1}/${PARTES}: ${mias.length} por revisar (${hechos.size} ya revisados)`);
 const total = { vertical: 0, franjas: 0, foto: 0, horizontal: 0, errores: 0 };
 let n = 0;
@@ -84,7 +91,12 @@ for (const f of mias) {
   total[m.tipo]++;
   if (m.tipo !== "vertical") {
     console.log(`${f.id} (${f.restaurante_id}): ${m.tipo} · ${m.W}x${m.H} con imagen ${m.cw}x${m.ch} · ${m.quieto}/${Math.min(8, m.dur)} s quieto`);
-    if (!SIMULAR) await d1("UPDATE videos_elegidos SET vertical = 0, ancho = ?, alto = ? WHERE publicacion_id = ?", [m.cw, m.ch, f.id]);
+    if (!SIMULAR)
+      await d1(
+        `INSERT INTO video_medida (publicacion_id, fuente, ancho, alto, vertical, motivo, medido_en) VALUES (?, 'contenido', ?, ?, 0, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+         ON CONFLICT (publicacion_id, fuente) DO UPDATE SET ancho = excluded.ancho, alto = excluded.alto, vertical = 0, motivo = excluded.motivo, medido_en = excluded.medido_en`,
+        [f.id, m.cw, m.ch, m.tipo],
+      );
   }
   hechos.add(f.id);
   if (n % 50 === 0) { await guardarHechos(hechos); console.log(`[${n}] ${JSON.stringify(total)}`); }
