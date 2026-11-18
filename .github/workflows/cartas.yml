@@ -2,6 +2,10 @@
 # encargado de cartas haga esto todo el tiempo de manera autónoma»). La nube de las rutinas no sale a internet y la PC
 # no está siempre: corre acá, gratis. 4 máquinas cada 2 horas: primero las cartas vencidas y nunca leídas; una vez por
 # día (06 UTC) también las S/A marcadas como leídas pero sin platos. Respeta robots.txt; tope de 3 min por carta.
+# 18/11 (infra ágil, etapa 3): el Worker ya no lee PDF (unpdf salió del armado). Las cartas en PDF que encuentra el
+# Worker quedan con próxima revisión 2000-01-01 (PDF_PARA_GITHUB) y este encargado las toma PRIMERO; acá cartas.mjs
+# registra el lector de PDF (src/lib/pdf-cartas.ts: texto con unpdf y páginas dibujadas con @napi-rs/canvas).
+# cartas.mjs se arma en tenedor-infra con «npm run cartas:paquete».
 name: cartas
 on:
   schedule:
