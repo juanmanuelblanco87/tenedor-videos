@@ -1,15 +1,36 @@
 # Revisión del contenido de los videos verticales (revisar-contenido.mjs, 11/11/2026): los que son una foto quieta o un
-# horizontal con franjas negras pasan a contar como apaisados (van al final de la tarjeta). 4 máquinas, cada 3 horas.
+# horizontal con franjas negras pasan a contar como apaisados (van al final de la tarjeta). 4 máquinas.
+# 18/11/2026 (infra ágil, etapa 5: topes a D1): una vez por día a las 06:20 de Buenos Aires (09:20 UTC; antes cada 3 h).
+# El job «cola» arma la lista UNA vez (videos_elegidos por clave en tramos de 1.000) y la deja en R2; las 4 partes la
+# leen de ahí (antes cada parte leía 72 k filas por corrida).
 name: revisar-contenido
 on:
   schedule:
-    - cron: "20 */3 * * *"
+    - cron: "20 9 * * *"
   workflow_dispatch:
 concurrency:
   group: revisar-contenido
   cancel-in-progress: false
 jobs:
+  cola:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      items: ${{ steps.cola.outputs.items }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Armar la cola (una sola vez por corrida)
+        id: cola
+        run: node revisar-contenido.mjs --armar-cola --tope-filas 60000 || echo "items=0" >> "$GITHUB_OUTPUT"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_APP_ID: ${{ secrets.D1_APP_ID }}
   revisar:
+    needs: cola
+    if: needs.cola.outputs.items != '' && needs.cola.outputs.items != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 55
     strategy:

@@ -1,11 +1,14 @@
 # Hostinger → R2 (a-r2.mjs, 12/11/2026): portadas → fotos de IG → videos ya copiados, misma ruta. 2 pedidos a la vez
 # contra Hostinger con pausa; frena ante 429/503 y corta a los 3 errores seguidos. Se vuelve a lanzar sola mientras
-# quede trabajo (quedan > 0); el schedule cada 2 h es el respaldo (los de GitHub no son confiables en este repo).
-# Apagar la cadena: variable del repo A_R2_CONTINUO = apagado. Sale siempre con 0 (sin mails de GitHub).
+# quede trabajo (quedan > 0). Apagar la cadena: variable del repo A_R2_CONTINUO = apagado. Sale siempre con 0.
+# 18/11/2026 (infra ágil, etapa 5: topes a D1): una vez por día a las 05:10 de Buenos Aires (08:10 UTC; antes cada 2 h,
+# ~670 k filas por corrida para encontrar 13 videos y 20 portadas). Recorre videos_copia, fotos_reales y publicaciones por
+# clave en tramos de 5.000 con tope de 120 k filas por corrida y cursor en ia_config: la cadena sigue desde donde quedó,
+# siempre fuera de las horas pico de la app (11 a 15 y 19 a 24 h de Buenos Aires).
 name: a-r2
 on:
   schedule:
-    - cron: "10 */2 * * *"
+    - cron: "10 8 * * *"
   workflow_dispatch:
     inputs:
       portadas: { description: "Tope de portadas", required: false, default: "20000" }
@@ -37,7 +40,7 @@ jobs:
         with: { node-version: 22 }
       - name: Hostinger → R2
         id: copia
-        run: node a-r2.mjs --portadas ${{ inputs.portadas || '20000' }} --fotos ${{ inputs.fotos || '8000' }} --videos ${{ inputs.videos || '3000' }} --noche-x 2 --hostinger-a-la-vez ${{ inputs.a_la_vez || '3' }} --pausa 100 --minutos 100 --requiere-s3 || true
+        run: node a-r2.mjs --portadas ${{ inputs.portadas || '20000' }} --fotos ${{ inputs.fotos || '8000' }} --videos ${{ inputs.videos || '3000' }} --noche-x 2 --hostinger-a-la-vez ${{ inputs.a_la_vez || '3' }} --pausa 100 --minutos 100 --requiere-s3 --tope-filas 120000 || true
   seguir:
     needs: hostinger
     if: always() && needs.hostinger.outputs.quedan != '' && needs.hostinger.outputs.quedan != '0' && vars.A_R2_CONTINUO != 'apagado'

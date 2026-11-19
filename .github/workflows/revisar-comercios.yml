@@ -1,4 +1,7 @@
 # Revisor de comercios (rubro e Instagram) con IA instalable gratis: Ollama + Gemma 4 E4B en máquinas de GitHub (10/11/2026).
+# 18/11/2026 (infra ágil, etapa 5: topes a D1): el job «cola» arma la lista UNA vez (locales_prioridad por nivel en tramos
+# de 500 por clave) y la deja en R2; las 12 partes la leen de ahí (antes cada una hacía una consulta de 82 k filas). Fuera
+# de las horas pico de la app (11 a 15 y 19 a 24 h de Buenos Aires).
 name: revisar-comercios
 on:
   workflow_dispatch:
@@ -7,7 +10,25 @@ on:
         description: "niveles (S,A o B)"
         default: "S,A"
 jobs:
+  cola:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      items: ${{ steps.cola.outputs.items }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Armar la cola (una sola vez por corrida)
+        id: cola
+        run: node revisar-comercios.mjs --armar-cola --niveles "${{ inputs.niveles || 'S,A' }}" --tope-filas 60000 || echo "items=0" >> "$GITHUB_OUTPUT"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_APP_ID: ${{ secrets.D1_APP_ID }}
   revisar:
+    needs: cola
+    if: needs.cola.outputs.items != '' && needs.cola.outputs.items != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 330
     strategy:

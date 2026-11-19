@@ -1,16 +1,24 @@
 # Instagram → R2 (a-r2.mjs --directos, 12/11/2026, dueño: «todo se guarda en nuestros servidores»): videos y fotos de
 # Instagram que todavía apuntan al CDN de Instagram, los que vencen antes primero; lo que ya está en R2 se re-apunta
 # (recupera vencidos). 4 máquinas × 4 descargas a la vez (el límite es el 429 de Instagram: si aparece, esa parte frena).
-# Corre en cadena: al terminar se vuelve a lanzar (si fue corta, a los 10 min) (lo nuevo de anonyig/Meta queda a salvo en < 1 h).
-# Schedule cada hora de respaldo. Apagar la cadena: variable del repo A_R2_CONTINUO = apagado. Sale siempre con 0.
+# 18/11/2026 (infra ágil, etapa 5: topes a D1):
+#   · job «cola»: UNA máquina arma la lista desde los índices parciales de la migración app 0036 (por clave, de a 500,
+#     con tope de filas) y la deja en R2; las 4 partes la leen de ahí (antes cada parte barría 630 k filas por corrida);
+#   · cada hora fuera de las horas pico de la app (11 a 15 y 19 a 24 h de Buenos Aires = 14 a 18 y 22 a 03 UTC) y sólo lo
+#     vivo; a las 06 h de Buenos Aires (09 UTC) el «barrido» suma lo vencido (recupera lo que ya está en R2 y arma la
+#     lista para anonyig);
+#   · la cadena se relanza sólo si la corrida trabajó de verdad (20 min o más) y fuera del pico; si cortó por errores o
+#     no había trabajo, espera el horario (antes se relanzaba cada 20 min cortando a los 3 errores).
+# Apagar la cadena: variable del repo A_R2_CONTINUO = apagado. Sale siempre con 0.
 name: a-r2-directos
 on:
   schedule:
-    - cron: "40 * * * *"
+    - cron: "40 3-12,18-20 * * *"
   workflow_dispatch:
     inputs:
       directos: { description: "Tope por parte", required: false, default: "3000" }
       a_la_vez: { description: "Descargas a la vez por parte", required: false, default: "4" }
+      barrido: { description: "Barrido completo (también vencidos): si/no", required: false, default: "no" }
 concurrency:
   group: a-r2-directos
   cancel-in-progress: false
@@ -18,7 +26,28 @@ permissions:
   actions: write
   contents: read
 jobs:
+  cola:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_APP_ID: ${{ secrets.D1_APP_ID }}
+    outputs:
+      quedan: ${{ steps.cola.outputs.quedan }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Armar la cola (una sola vez por corrida)
+        id: cola
+        run: |
+          B=""; T=45000
+          if [ "$(date -u +%H)" = "09" ] || [ "${{ inputs.barrido }}" = "si" ]; then B="--barrido"; T=150000; fi
+          node a-r2.mjs --armar-cola --directos 1 $B --tope-filas $T || echo "quedan=0" >> "$GITHUB_OUTPUT"
   directos:
+    needs: cola
+    if: needs.cola.outputs.quedan != '' && needs.cola.outputs.quedan != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 70
     strategy:
@@ -42,16 +71,18 @@ jobs:
         timeout-minutes: 10
         run: which ffmpeg || timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null || (timeout 300 sudo apt-get update -qq && timeout 240 sudo apt-get install -y -qq ffmpeg >/dev/null)
       - name: Directos de Instagram → R2 (parte ${{ matrix.parte }})
-        run: node a-r2.mjs --directos ${{ inputs.directos || '3000' }} --partes 4 --parte ${{ matrix.parte }} --a-la-vez ${{ inputs.a_la_vez || '4' }} ${{ matrix.parte == 0 && '--recuperar' || '' }} --minutos 55 || true
+        run: node a-r2.mjs --directos ${{ inputs.directos || '3000' }} --partes 4 --parte ${{ matrix.parte }} --a-la-vez ${{ inputs.a_la_vez || '4' }} --minutos 55 || true
   seguir:
-    needs: directos
-    if: always() && vars.A_R2_CONTINUO != 'apagado'
+    needs: [cola, directos]
+    if: always() && needs.directos.result == 'success' && vars.A_R2_CONTINUO != 'apagado'
     runs-on: ubuntu-latest
     steps:
-      # Si la corrida fue corta (poco trabajo o cortó por errores) espera 10 min antes de la siguiente; si fue larga, sigue ya.
+      # Sólo si la corrida fue larga (había trabajo de verdad) y fuera de las horas pico; si no, sigue el horario.
       - run: |
           ini=$(gh run view ${{ github.run_id }} -R ${{ github.repository }} --json createdAt -q .createdAt)
           dur=$(( $(date +%s) - $(date -d "$ini" +%s) ))
-          [ "$dur" -lt 1200 ] && sleep 600
+          h=$(( ($(date -u +%-H) + 21) % 24 ))
+          if [ "$dur" -lt 1200 ]; then echo "Corrida corta ($dur s): espera el horario."; exit 0; fi
+          if [ "$h" -ge 19 ] || { [ "$h" -ge 11 ] && [ "$h" -lt 15 ]; }; then echo "Hora pico ($h h AR): espera el horario."; exit 0; fi
           gh workflow run a-r2-directos.yml -R ${{ github.repository }}
         env: { GH_TOKEN: "${{ github.token }}" }

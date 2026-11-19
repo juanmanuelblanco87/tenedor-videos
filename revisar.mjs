@@ -6,6 +6,18 @@
 //   2. si no, dos cuadros (segundos 3 y 9, a 256 px): si los dos son ajenos → afuera.
 // Afuera = publicacion oculta + fuera de elegidos. Todo queda en videos_revision (se puede volver atrás).
 // Orden: S, A+ (ia_config nivel_a_mas), A, B. Uso: node revisar.mjs --partes N --parte k [--minutos 300] [--modelo lfm3-vl:2b]
+// 18/11/2026 (infra ágil, etapa 5: topes a D1). Antes cada una de las 16 partes leía la cola entera (151 k filas por
+// llamada) y cada aprobación recorría videos_revision (38 k filas: 175 M de filas en 2 días). Ahora:
+//   · la cola la arma UNA máquina (--armar-cola, job «cola» de revisar.yml) y la deja en R2; las partes la leen de ahí;
+//   · cola = los «pendiente» de videos_revision (los escribe el lector de anonyig; índice parcial videos_revision_pendiente,
+//     migración app 0036), en tramos de 500 por clave; más los elegidos visibles sin revisión, recorriendo
+//     videos_elegidos por clave con cursor en ia_config («revisar_cursor_sin_revision») y tope de filas por corrida;
+//   · las escrituras van por clave (aprobar: EXISTS por la clave de videos_revision; sacar de elegidos: índice
+//     videos_elegidos_publicacion);
+//   · no corre en las horas pico de la app (11 a 15 y 19 a 24 h de Buenos Aires): no arranca y, si entra en el pico,
+//     corta y sigue en la próxima corrida.
+import { appendFileSync } from "node:fs";
+import { agotado, consultar, enPico, exigirIndices, guardarCola, guardarCursor, leerCola, leerCursor, resumenLecturas, salirSiPico } from "./d1.mjs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFileSync, rmSync, existsSync } from "node:fs";
@@ -19,19 +31,10 @@ const MODELO = arg("--modelo", "lfm3-vl:2b");
 const MODELO_TEXTO = arg("--modelo-texto", "gemma4:e4b");
 const t0 = Date.now();
 
-async function d1(sql, params = []) {
-  for (let i = 0; i < 4; i++) {
-    const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/d1/database/${env.D1_APP_ID}/query`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "content-type": "application/json" },
-      body: JSON.stringify({ sql, params }),
-    }).catch(() => null);
-    const j = await r?.json().catch(() => null);
-    if (j?.success) return j.result[0].results;
-    await new Promise((ok) => setTimeout(ok, 3000 * (i + 1)));
-  }
-  throw new Error("D1 no responde");
-}
+const d1 = (sql, params = []) => consultar(sql, params);
+const ARMAR_COLA = process.argv.includes("--armar-cola");
+salirSiPico(ARMAR_COLA ? "revisar (cola)" : `revisar parte ${PARTE + 1}/${PARTES}`);
+await exigirIndices(["videos_revision_pendiente", "videos_elegidos_publicacion"], ARMAR_COLA ? "revisar (cola)" : `revisar parte ${PARTE + 1}/${PARTES}`);
 async function ollama(sistema, texto, imagen, modelo = MODELO) {
   const r = await fetch("http://127.0.0.1:11434/api/chat", {
     method: "POST",
@@ -60,17 +63,87 @@ async function cuadro(url, seg) {
   return { gastro: typeof j.gastro === "boolean" ? j.gastro : null, conf: Number(j.confianza ?? 0), que: String(j.que ?? "") };
 }
 
+const NOMBRE_COLA = "revisar";
+const CURSOR_SIN_REVISION = "revisar_cursor_sin_revision";
+const COLS = `coalesce(lp.nivel,'C') AS nivel, coalesce(lp.puntaje,0) AS puntaje, c.url, substr(coalesce(p.texto,''),1,700) AS texto, r.nombre, r.estado, p.oculta`;
+
+/** Una sola máquina por corrida: arma la cola leyendo sólo lo pendiente y la guarda en R2. */
+async function armarCola() {
+  const items = [];
+  const vistos = new Set();
+  const sumar = (f) => {
+    if (!f.url || f.nombre == null || f.estado === "cerrado" || vistos.has(`${f.id}|${f.rid}`)) return;
+    vistos.add(`${f.id}|${f.rid}`);
+    const { estado, oculta, ...resto } = f;
+    items.push(resto);
+  };
+  // 1) Pendientes (entran ocultos y se muestran si la revisión los aprueba). Tramos de 500 claves del índice parcial;
+  //    los LEFT JOIN van por clave y lo que no está elegido o no tiene copia se descarta acá.
+  for (let desde = ""; ; ) {
+    const filas = await d1(
+      `WITH t AS (SELECT publicacion_id FROM videos_revision WHERE accion = 'pendiente' AND publicacion_id > ? ORDER BY publicacion_id LIMIT 500)
+       SELECT t.publicacion_id AS id, e.restaurante_id AS rid, ${COLS}
+       FROM t LEFT JOIN videos_elegidos e ON e.publicacion_id = t.publicacion_id LEFT JOIN videos_copia c ON c.publicacion_id = t.publicacion_id
+       LEFT JOIN publicaciones p ON p.id = t.publicacion_id LEFT JOIN restaurantes r ON r.id = e.restaurante_id
+       LEFT JOIN locales_prioridad lp ON lp.restaurante_id = e.restaurante_id ORDER BY t.publicacion_id`,
+      [desde],
+    );
+    filas.filter((f) => f.rid != null).forEach(sumar);
+    if (!filas.length) break;
+    const ultimo = filas.at(-1).id;
+    const tramo = new Set(filas.map((f) => f.id)).size;
+    if (tramo < 500 || agotado()) break;
+    desde = ultimo;
+  }
+  const pendientes = items.length;
+  // 2) Elegidos visibles sin ninguna revisión (los que no vienen del lector de anonyig). Recorre videos_elegidos por
+  //    clave (1.000 por tramo) desde donde quedó la corrida anterior, hasta el tope de filas.
+  const cur = await leerCursor(CURSOR_SIN_REVISION);
+  let k = cur.desde ?? ["", ""];
+  let completo = false;
+  while (!agotado()) {
+    const tramo = await d1(
+      `WITH t AS (SELECT restaurante_id, publicacion_id FROM videos_elegidos WHERE (restaurante_id, publicacion_id) > (?, ?) ORDER BY restaurante_id, publicacion_id LIMIT 1000)
+       SELECT t.restaurante_id AS rid, t.publicacion_id AS id, NOT EXISTS (SELECT 1 FROM videos_revision v WHERE v.publicacion_id = t.publicacion_id) AS sin FROM t`,
+      k,
+    );
+    const sin = tramo.filter((x) => Number(x.sin) === 1);
+    if (sin.length)
+      (await d1(
+        `SELECT j.value->>'id' AS id, j.value->>'rid' AS rid, ${COLS}
+         FROM json_each(?) j JOIN videos_copia c ON c.publicacion_id = j.value->>'id' JOIN publicaciones p ON p.id = j.value->>'id'
+         JOIN restaurantes r ON r.id = j.value->>'rid' LEFT JOIN locales_prioridad lp ON lp.restaurante_id = j.value->>'rid'`,
+        [JSON.stringify(sin.map((x) => ({ id: x.id, rid: x.rid })))],
+      ))
+        .filter((f) => Number(f.oculta) === 0)
+        .forEach(sumar);
+    if (tramo.length < 1000) {
+      completo = true;
+      break;
+    }
+    k = [tramo.at(-1).rid, tramo.at(-1).id];
+  }
+  await guardarCursor(CURSOR_SIN_REVISION, completo ? { desde: null, vuelta_completa: true } : { desde: k });
+  console.log(`Cola: ${pendientes} pendientes + ${items.length - pendientes} visibles sin revisión${completo ? " (vuelta completa)" : " (sigue la próxima corrida)"} · ${resumenLecturas()}`);
+  return items;
+}
+
+if (ARMAR_COLA) {
+  const items = await armarCola();
+  await guardarCola(NOMBRE_COLA, items);
+  if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `items=${items.length}\n`);
+  process.exit(0);
+}
+
 const aMasFila = (await d1("SELECT valor FROM ia_config WHERE clave = 'nivel_a_mas'"))[0];
 const aMas = new Set(aMasFila ? JSON.parse(String(aMasFila.valor)).ids : []);
-const filas = await d1(
-  `SELECT e.publicacion_id AS id, e.restaurante_id AS rid, coalesce(lp.nivel,'C') AS nivel, coalesce(lp.puntaje,0) AS puntaje, c.url, substr(coalesce(p.texto,''),1,700) AS texto, r.nombre
-   FROM videos_elegidos e JOIN videos_copia c ON c.publicacion_id = e.publicacion_id JOIN publicaciones p ON p.id = e.publicacion_id
-   JOIN restaurantes r ON r.id = e.restaurante_id LEFT JOIN locales_prioridad lp ON lp.restaurante_id = e.restaurante_id
-   WHERE r.estado <> 'cerrado' AND (
-     (p.oculta = 0 AND NOT EXISTS (SELECT 1 FROM videos_revision v WHERE v.publicacion_id = e.publicacion_id))
-     -- 10/11 (dueño): los videos nuevos entran ocultos («pendiente») y recién se muestran si la revisión los aprueba.
-     OR EXISTS (SELECT 1 FROM videos_revision v WHERE v.publicacion_id = e.publicacion_id AND v.accion = 'pendiente'))`,
-);
+// Sin job «cola» (corrida a mano de una sola parte): la arma esta misma máquina.
+const guardada = PARTES > 1 ? await leerCola(NOMBRE_COLA) : null;
+if (PARTES > 1 && !guardada) {
+  console.log("No está la cola de esta corrida en R2 (el job «cola» no la armó): nada que hacer.");
+  process.exit(0);
+}
+const filas = guardada ? guardada.items : await armarCola();
 const hash = (s) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
 const rango = (x) => (x.nivel === "S" ? 0 : aMas.has(String(x.rid)) ? 1 : x.nivel === "A" ? 2 : x.nivel === "B" ? 3 : 4);
 const cola = filas.filter((x) => hash(String(x.id)) % PARTES === PARTE).sort((a, b) => rango(a) - rango(b) || Number(b.puntaje) - Number(a.puntaje));
@@ -89,6 +162,10 @@ async function afuera(v, como, que) {
 let seguidos = 0;
 for (const v of cola) {
   if (Date.now() - t0 > MINUTOS * 60_000) break;
+  if (enPico() && !process.argv.includes("--forzar")) {
+    console.log("Entró la hora pico de la app: corto; lo que falta sigue en la próxima corrida.");
+    break;
+  }
   try {
     const texto = String(v.texto ?? "").trim();
     let txt = null;
@@ -106,7 +183,8 @@ Texto de la publicación: ${texto}`, null, MODELO_TEXTO);
       const imagenSi = a?.gastro === true || b?.gastro === true;
       const imagenNo = a?.gastro === false && (b === null || b.gastro === false);
       if (imagenSi) {
-        await d1("UPDATE publicaciones SET oculta = 0 WHERE id = ? AND id IN (SELECT publicacion_id FROM videos_revision WHERE accion = 'pendiente')", [String(v.id)]);
+        // Por clave (antes «id IN (SELECT … WHERE accion = 'pendiente')» recorría videos_revision entera: 38 k filas).
+        await d1("UPDATE publicaciones SET oculta = 0 WHERE id = ? AND EXISTS (SELECT 1 FROM videos_revision v WHERE v.publicacion_id = publicaciones.id AND v.accion = 'pendiente')", [String(v.id)]);
         await anotar(v, true, "imagen", a?.gastro ? a.que : (b?.que ?? ""), "ok");
         est.ok++;
       } else if (imagenNo && txt?.gastro !== true) {
@@ -128,4 +206,4 @@ Texto de la publicación: ${texto}`, null, MODELO_TEXTO);
   }
   if (est.revisados % 50 === 0) console.log(`[avance ${est.revisados}/${cola.length}] ${JSON.stringify(est)} · ${Math.round((Date.now() - t0) / 60000)} min`);
 }
-console.log(`Listo: ${JSON.stringify(est)}`);
+console.log(`Listo: ${JSON.stringify(est)} · ${resumenLecturas()}`);
