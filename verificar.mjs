@@ -2,23 +2,28 @@
 // SÓLO LECTURA: lee videos_copia de D1 y hace HEAD a cada link (de a pocos, para no gatillar el freno de LiteSpeed).
 // Deja la lista en el registro y en verificar-404.txt (artefacto). No toca la base.
 // Uso: node verificar.mjs [--a-la-vez 4]
+// 18/11/2026 (infra ágil, etapa 5): lee videos_copia por clave en tramos de 2.000 (antes, todo en una consulta de 85 k
+// filas más la de restaurantes) y no arranca en las horas pico de la app.
 import { writeFileSync } from "node:fs";
+import { consultar, resumenLecturas, salirSiPico } from "./d1.mjs";
 const env = process.env;
 for (const k of ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "D1_APP_ID"]) if (!env[k]) throw new Error(`Falta el secreto ${k}`);
 const i0 = process.argv.indexOf("--a-la-vez");
 const A_LA_VEZ = i0 > 0 ? Number(process.argv[i0 + 1]) : 4;
 const espera = (ms) => new Promise((ok) => setTimeout(ok, ms));
-async function d1(sql) {
-  const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/d1/database/${env.D1_APP_ID}/query`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "content-type": "application/json" },
-    body: JSON.stringify({ sql }),
-  });
-  const j = await r.json();
-  if (!j.success) throw new Error(JSON.stringify(j.errors));
-  return j.result[0].results;
+salirSiPico("verificar");
+const filas = [];
+for (let desde = ""; ; ) {
+  const tramo = await consultar(
+    `SELECT c.publicacion_id, c.restaurante_id, c.url, c.bytes, c.copiado_en, r.nombre FROM videos_copia c LEFT JOIN restaurantes r ON r.id = c.restaurante_id
+     WHERE c.publicacion_id > ? ORDER BY c.publicacion_id LIMIT 2000`,
+    [desde],
+  );
+  filas.push(...tramo);
+  if (tramo.length < 2000) break;
+  desde = tramo.at(-1).publicacion_id;
 }
-const filas = await d1("SELECT c.publicacion_id, c.restaurante_id, c.url, c.bytes, c.copiado_en, r.nombre FROM videos_copia c LEFT JOIN restaurantes r ON r.id = c.restaurante_id");
+console.log(resumenLecturas());
 console.log(`Copias a revisar: ${filas.length}`);
 const est = { ok: 0, f404: 0, otros: 0, error: 0 };
 const malos = [];

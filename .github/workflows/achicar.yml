@@ -1,9 +1,11 @@
 # Achicado de los videos copiados que quedaron pesados (achicar.mjs, 07/11/2026). 4 máquinas en paralelo, cada hora,
 # tandas de 50 min. Baja de Hostinger (no toca Instagram), achica y vuelve a subir con el mismo nombre.
+# 18/11/2026 (infra ágil, etapa 5: topes a D1): sólo fuera de las horas pico de la app (11 a 15 y 19 a 24 h de Buenos
+# Aires = 14 a 18 y 22 a 03 UTC) y la lista sale del índice parcial de los videos en Hostinger, con LIMIT.
 name: achicar
 on:
   schedule:
-    - cron: "40 * * * *"
+    - cron: "40 3-12,18-20 * * *"
   workflow_dispatch:
     inputs:
       max:

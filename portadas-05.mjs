@@ -15,6 +15,7 @@
 import { createHash, createHmac } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { diferencia, portadaDeVideo } from "./portada.mjs";
+import { consultar, resumenLecturas, salirSiPico } from "./d1.mjs";
 
 const arg = (n, def) => {
   const i = process.argv.indexOf(n);
@@ -36,24 +37,10 @@ const quedaTiempo = () => Date.now() - t0 < MINUTOS * 60_000;
 const espera = (ms) => new Promise((ok) => setTimeout(ok, ms));
 const limpio = (id) => String(id).replace(/[^\w-]/g, "");
 
-// ---------- D1 (API REST) ----------
-async function d1(sql, params = [], intento = 0) {
-  const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/d1/database/${env.D1_APP_ID}/query`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "content-type": "application/json" },
-    body: JSON.stringify({ sql, params }),
-    signal: AbortSignal.timeout(60_000),
-  }).catch((e) => ({ ok: false, status: String(e?.name ?? e), json: async () => null }));
-  const j = await r.json().catch(() => null);
-  if (!r.ok || !j?.success) {
-    if (intento < 4) {
-      await espera([3_000, 8_000, 15_000, 30_000][intento]);
-      return d1(sql, params, intento + 1);
-    }
-    throw new Error(`D1 ${r.status} ${j?.errors?.map((e) => e.message).join("; ") ?? ""}`);
-  }
-  return j.result?.[0]?.results ?? [];
-}
+// ---------- D1 (d1.mjs) ----------
+// 18/11 (infra ágil, etapa 5): sin los count(*) de videos_copia entera (85 k filas cada uno); fuera de las horas pico.
+const d1 = (sql, params = []) => consultar(sql, params);
+salirSiPico("portadas-05");
 
 // ---------- R2 por la API S3 (no gasta el cupo de api.cloudflare.com) ----------
 const S3 = { id: env.R2_ACCESS_KEY_ID, secreto: env.R2_SECRET_ACCESS_KEY, base: env.R2_ENDPOINT.replace(/\/$/, "") };
@@ -122,9 +109,8 @@ if (av.terminado) {
   if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, "quedan=0\n");
   process.exit(0);
 }
-const total = Number((await d1("SELECT count(*) AS n FROM videos_copia"))[0].n);
 const lista = await d1("SELECT publicacion_id AS id, url FROM videos_copia WHERE publicacion_id > ? ORDER BY publicacion_id LIMIT ?", [av.desde ?? "", MAX]);
-console.log(`Portadas 0,5 s: ${total} videos con copia; ya revisados ${av.revisadas}; esta tanda ${lista.length}${PRUEBA ? " (PRUEBA: no sube)" : ""}`);
+console.log(`Portadas 0,5 s: ya revisados ${av.revisadas}; esta tanda ${lista.length}${PRUEBA ? " (PRUEBA: no sube)" : ""}`);
 
 // Las respuestas se procesan en paralelo, pero el cursor sólo avanza hasta el último id con todos los anteriores listos.
 const listos = new Array(lista.length).fill(false);
@@ -197,7 +183,8 @@ await Promise.all(
 let hasta = -1;
 while (hasta + 1 < listos.length && listos[hasta + 1]) hasta++;
 if (hasta >= 0 && !PRUEBA) av.desde = String(lista[hasta].id);
-const quedan = corte.startsWith("3 errores") ? 0 : Number((await d1("SELECT count(*) AS n FROM videos_copia WHERE publicacion_id > ?", [av.desde ?? ""]))[0].n);
+// ¿Queda alguno después del cursor? (antes contaba todos los que faltaban: hasta 85 k filas por llamada)
+const quedan = corte.startsWith("3 errores") ? 0 : (await d1("SELECT 1 AS hay FROM videos_copia WHERE publicacion_id > ? LIMIT 1", [av.desde ?? ""])).length;
 let quedanFinal = quedan;
 if (!PRUEBA && quedan === 0 && !corte) {
   av.terminado = new Date().toISOString();
@@ -216,8 +203,9 @@ if (!PRUEBA)
     JSON.stringify(av),
     new Date().toISOString(),
   ]);
-const resumen = `Portadas 0,5 s: revisadas ${av.revisadas}/${total} · iguales ${av.iguales} · casi iguales ${av.casi} · DISTINTAS ${av.distintas} · faltaban ${av.faltaban} · sin video ${av.sin_video} · todavía no en R2 ${av.sin_r2 ?? 0} · errores ${av.errores} · quedan ${quedan}${corte ? ` · corte: ${corte}` : ""} (${Math.round((Date.now() - t0) / 60000)} min)`;
+const resumen = `Portadas 0,5 s: revisadas ${av.revisadas} · iguales ${av.iguales} · casi iguales ${av.casi} · DISTINTAS ${av.distintas} · faltaban ${av.faltaban} · sin video ${av.sin_video} · todavía no en R2 ${av.sin_r2 ?? 0} · errores ${av.errores} · quedan ${quedan}${corte ? ` · corte: ${corte}` : ""} (${Math.round((Date.now() - t0) / 60000)} min)`;
 console.log(resumen);
 if (ejemplos.length) console.log(`  ejemplos de distintas: ${ejemplos.join(", ")}`);
 if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${resumen}\n`);
+console.log(resumenLecturas());
 if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `quedan=${PRUEBA ? 0 : quedan}\n`);

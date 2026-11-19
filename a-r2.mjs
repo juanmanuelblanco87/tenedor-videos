@@ -19,11 +19,25 @@
 //     sólo se vuelve a apuntar. Así se RECUPERA también lo vencido que ya tenía copia propia.
 //   - Si Instagram niega el archivo (403/404/410) o el link venció, se saltea (no se rodea) y queda anotado en ia_config
 //     «r2_directos_vencidos» (comercios) para el lector de anonyig. 429 de Instagram = frenar esa parte.
-//   --recuperar: además re-apunta las fotos de Instagram vencidas que ya tienen copia en Hostinger (fotos-ig/<id>.jpg
-//     registrada en fotos_reales por fotos-ig-copia).
+//   --recuperar: (hasta el 18/11) re-apuntaba con un UPDATE … LIKE las fotos con copia en Hostinger; ver abajo.
+//   --armar-cola [--barrido]: sólo arma la cola de directos y la deja en R2 (job «cola» de a-r2-directos.yml).
 // Reglas del dueño: 429/503 de Hostinger = frenar (sigue la próxima corrida); 3 errores seguidos = cortar la fase; sin
 // notificaciones (sale siempre con 0: un rojo de GitHub manda mail). Lo ya copiado se saltea por el listado de R2.
 // Escribe «quedan=<n>» en $GITHUB_OUTPUT: el workflow se vuelve a lanzar solo mientras quede trabajo.
+//
+// 18/11/2026 (infra ágil, etapa 5: topes a D1). Antes cada parte barría publicaciones y fotos_reales enteras con
+// LIKE '%cdninstagram%' (295 k + 206 k + 132 k filas por parte y por corrida, ~450 corridas en 2 días, y la cadena se
+// relanzaba cada 20 min aunque cortara por errores). Ahora:
+//   · la cola sale de los índices parciales publicaciones_cola_copia y fotos_reales_cola_copia (migración app 0036),
+//     paginada por clave (vence_en, id) de a 500, con tope de filas por corrida (--tope-filas, d1.mjs);
+//   · la arma UNA máquina (--armar-cola, job «cola» de a-r2-directos.yml) y la deja en R2; las 4 partes la leen de ahí;
+//   · cada hora sólo lo VIVO (vence en más de 10 min); una vez por día (--barrido) también lo vencido: recupera lo que
+//     ya está en R2 y escribe «r2_directos_vencidos» para el lector de anonyig (antes lo escribía cada corrida);
+//   · --recuperar ya no hace el UPDATE … LIKE (340 k filas, 1,6 s): lo cubre el re-apuntado de lo que ya está en R2
+//     (a-r2.yml copia fotos-ig/ de Hostinger a R2 con la misma clave);
+//   · Hostinger → R2 recorre videos_copia, fotos_reales y publicaciones por clave en tramos, con cursor en ia_config
+//     («a_r2_hostinger_cursor»): cada corrida sigue donde quedó la anterior;
+//   · no corre en las horas pico de la app (11 a 15 y 19 a 24 h de Buenos Aires).
 import { execFile } from "node:child_process";
 import { createHash, createHmac } from "node:crypto";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -31,6 +45,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { portadaDeVideo } from "./portada.mjs";
+import { COLA_FOTOS_REALES, COLA_PUBLICACIONES, NO_VENCE, HOSTINGER_VIDEOS, agotado, consultar, d1Base, exigirIndices, guardarCola, guardarCursor, hash, leerCola, leerCursor, resumenLecturas, salirSiPico } from "./d1.mjs";
 
 const ejecutar = promisify(execFile);
 const arg = (n, def) => {
@@ -57,7 +72,6 @@ const RECUPERAR = process.argv.includes("--recuperar");
 const DOMINIO = env.HOSTINGER_DOMINIO || "datos.tenedor.com.ar";
 const ORIGEN = `https://${DOMINIO}/`;
 const MEDIA = "https://media.tenedor.com.ar/";
-const NO_VENCE = "2100-01-01T00:00:00.000Z";
 const BUCKET = "tenedor-media";
 const R2 = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/r2/buckets/${BUCKET}/objects`;
 const auth = { authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}` };
@@ -65,7 +79,6 @@ const t0 = Date.now();
 const quedaTiempo = () => Date.now() - t0 < MINUTOS * 60_000;
 const espera = (ms) => new Promise((ok) => setTimeout(ok, ms));
 const limpio = (id) => String(id).replace(/[^\w-]/g, "");
-const hash = (s) => [...String(s)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
 const clave = (url) => {
   if (!url || !String(url).startsWith(ORIGEN)) return null;
   const k = decodeURIComponent(String(url).slice(ORIGEN.length).split("?")[0]);
@@ -81,26 +94,19 @@ const venceDe = (url, venceEn) => {
 };
 let quedan = 0;
 
-// ---------- D1 por la API REST (reintenta si la base está sobrecargada) ----------
-async function d1(sql, params = [], intento = 0) {
-  const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/d1/database/${env.D1_APP_ID}/query`, {
-    method: "POST",
-    headers: { ...auth, "content-type": "application/json" },
-    body: JSON.stringify({ sql, params }),
-    signal: AbortSignal.timeout(60_000),
-  }).catch((e) => ({ ok: false, status: String(e?.name ?? e), json: async () => null }));
-  const j = await r.json().catch(() => null);
-  if (!r.ok || !j?.success) {
-    const m = `D1 ${r.status} ${j?.errors?.map((e) => e.message).join("; ") ?? ""}`;
-    if ((r.status === 429 || /overloaded|Timeout|fetch failed/i.test(m)) && intento < 4) {
-      await espera([3_000, 8_000, 15_000, 30_000][intento]);
-      return d1(sql, params, intento + 1);
-    }
-    throw new Error(m);
-  }
-  return { filas: j.result?.[0]?.results ?? [], cambios: j.result?.[0]?.meta?.changes ?? 0 };
-}
-const consultar = async (sql, params) => (await d1(sql, params)).filas;
+const ARMAR_COLA = process.argv.includes("--armar-cola");
+const BARRIDO = process.argv.includes("--barrido");
+const PAGINA = 500;
+salirSiPico(ARMAR_COLA ? "a-r2 (cola)" : "a-r2");
+// Las partes que leen la cola de R2 sólo escriben por clave; el resto necesita los índices de la migración 0036.
+if (ARMAR_COLA || PARTES === 1)
+  await exigirIndices(["publicaciones_cola_copia", "fotos_reales_cola_copia", "videos_elegidos_publicacion", "videos_copia_hostinger_bytes"], "a-r2");
+
+// ---------- D1 (d1.mjs: reintentos, filas leídas por llamada y tope por corrida) ----------
+const d1 = async (sql, params = []) => {
+  const { filas, cambios } = await d1Base(env.D1_APP_ID, sql, params);
+  return { filas, cambios };
+};
 
 // ---------- R2 por la API REST ----------
 async function listarR2(prefijo) {
@@ -233,48 +239,83 @@ async function copiarDeHostinger(nombre, items, pausaMs) {
   return items.length - est.copiados - est.faltan_en_hostinger;
 }
 
-// ---------- 0) Videos ya copiados en Hostinger (primero: es lo que el feed espera) ----------
-if (TOPE.videos > 0) {
-  const enR2 = await listarR2("videos-ig/");
-  // 12/11 (medido en el iPhone del dueño): el 56 % de los videos copiados no estaba en R2 y el Worker probaba Hostinger
-  // (~0,9 s, muchas veces 429 → 302): esos videos llegaban sin nada bajado. Van PRIMERO (antes que portadas y fotos) y
-  // por lo que más se ve: elegidos de locales S, A, B, C; después el resto.
-  const filas = await consultar(
-    `SELECT v.url, v.bytes FROM videos_copia v LEFT JOIN locales_prioridad lp ON lp.restaurante_id = v.restaurante_id
-     WHERE v.url LIKE ?
-     ORDER BY (v.publicacion_id IN (SELECT publicacion_id FROM videos_elegidos)) DESC,
-              CASE coalesce(lp.nivel, 'C') WHEN 'S' THEN 0 WHEN 'A' THEN 1 WHEN 'B' THEN 2 ELSE 3 END, v.copiado_en DESC`,
-    [`${ORIGEN}videos-ig/%`],
-  );
-  const items = filas.map((f) => ({ k: clave(f.url), b: Number(f.bytes) })).filter((x) => x.k && enR2.get(x.k) !== x.b);
-  const gbFaltan = items.reduce((s, x) => s + (x.b || 0), 0) / 1e9;
-  console.log(`Videos (Hostinger): en R2 ${enR2.size}, faltan ${items.length} (~${gbFaltan.toFixed(1)} GB) de ${filas.length} · tope ${TOPE.videos}${NOCHE ? " (noche)" : ""}`);
-  quedan += Math.max(0, items.length - TOPE.videos);
-  quedan += await copiarDeHostinger("videos", items.slice(0, TOPE.videos), Math.max(H_PAUSA, 200));
+// ---------- Hostinger → R2: recorrido por clave con cursor (a-r2.yml) ----------
+// Fases en orden: videos (índice parcial videos_copia_hostinger_bytes: sólo los ~12 k que siguen en Hostinger), portadas
+// (claves de videos_copia), fotos de fotos_reales y fotos de publicaciones. Las tres últimas van en tramos de 5.000 por
+// clave; al llegar al tope de filas de la corrida se guarda dónde quedó y la próxima corrida sigue desde ahí.
+const TRAMO = 5_000;
+const CURSOR_H = "a_r2_hostinger_cursor";
+const hayHostinger = TOPE.videos > 0 || TOPE.portadas > 0 || TOPE.fotos > 0;
+const cursorH = hayHostinger ? await leerCursor(CURSOR_H) : {};
+let faseH = cursorH.fase ?? "videos";
+let desdeH = cursorH.desde ?? null;
+const FASES_H = ["videos", "portadas", "fotos_reales", "publicaciones"];
+const pasarFase = () => {
+  faseH = FASES_H[FASES_H.indexOf(faseH) + 1] ?? "fin";
+  desdeH = null;
+};
+
+// 0) Videos ya copiados en Hostinger (primero: es lo que el feed espera).
+if (faseH === "videos") {
+  if (TOPE.videos > 0) {
+    const enR2 = await listarR2("videos-ig/");
+    const filas = await consultar(`SELECT url, bytes FROM videos_copia WHERE ${HOSTINGER_VIDEOS}`);
+    const items = filas.map((f) => ({ k: clave(f.url), b: Number(f.bytes) })).filter((x) => x.k && enR2.get(x.k) !== x.b);
+    console.log(`Videos (Hostinger): en R2 ${enR2.size}, faltan ${items.length} de ${filas.length} · tope ${TOPE.videos}${NOCHE ? " (noche)" : ""}`);
+    quedan += Math.max(0, items.length - TOPE.videos);
+    quedan += await copiarDeHostinger("videos", items.slice(0, TOPE.videos), Math.max(H_PAUSA, 200));
+  }
+  pasarFase();
 }
 
-// ---------- 1) Portadas ----------
-if (TOPE.portadas > 0) {
+// 1) Portadas de los videos con copia (portadas-ig/<id>.jpg y -160.jpg), por clave de videos_copia.
+if (faseH === "portadas" && TOPE.portadas > 0) {
   const enR2 = await listarR2("portadas-ig/");
-  const ids = (await consultar("SELECT publicacion_id AS id FROM videos_copia ORDER BY copiado_en DESC")).map((x) => limpio(x.id));
-  const items = ids.flatMap((id) => [`portadas-ig/${id}.jpg`, `portadas-ig/${id}-160.jpg`]).filter((k) => !enR2.has(k)).map((k) => ({ k }));
-  console.log(`Portadas: en R2 ${enR2.size}, faltan ${items.length} (de ${ids.length * 2})`);
-  quedan += items.length - TOPE.portadas > 0 ? items.length - TOPE.portadas : 0;
-  quedan += await copiarDeHostinger("portadas", items.slice(0, TOPE.portadas), H_PAUSA);
-}
+  let faltan = [];
+  while (faseH === "portadas" && !agotado() && quedaTiempo()) {
+    const ids = (await consultar("SELECT publicacion_id AS id FROM videos_copia WHERE publicacion_id > ? ORDER BY publicacion_id LIMIT ?", [desdeH ?? "", TRAMO])).map((x) => String(x.id));
+    faltan.push(...ids.flatMap((id) => [`portadas-ig/${limpio(id)}.jpg`, `portadas-ig/${limpio(id)}-160.jpg`]).filter((k) => !enR2.has(k)));
+    if (ids.length < TRAMO) pasarFase();
+    else desdeH = ids.at(-1);
+  }
+  console.log(`Portadas: en R2 ${enR2.size}, faltan ${faltan.length} en lo recorrido`);
+  quedan += Math.max(0, faltan.length - TOPE.portadas);
+  quedan += await copiarDeHostinger("portadas", faltan.slice(0, TOPE.portadas).map((k) => ({ k })), H_PAUSA);
+} else if (faseH === "portadas") pasarFase();
+if ((faseH === "fotos_reales" || faseH === "publicaciones") && TOPE.fotos === 0) faseH = "fin";
 
-// ---------- 2) Fotos de Instagram ya copiadas en Hostinger ----------
-if (TOPE.fotos > 0 && quedaTiempo()) {
+// 2) Fotos de Instagram ya copiadas en Hostinger (fotos-ig/…): fotos_reales por (restaurante_id, orden) y publicaciones
+//    por id. Se trae la columna y se filtra acá (con el LIKE en la consulta, cada tramo podía recorrer la tabla entera).
+if ((faseH === "fotos_reales" || faseH === "publicaciones") && TOPE.fotos > 0 && quedaTiempo()) {
   const enR2 = await listarR2("fotos-ig/");
-  const urls = await consultar(
-    `SELECT url AS u FROM fotos_reales WHERE url LIKE ? UNION SELECT media_url FROM publicaciones WHERE media_url LIKE ? UNION SELECT portada_url FROM publicaciones WHERE portada_url LIKE ?`,
-    [`${ORIGEN}fotos-ig/%`, `${ORIGEN}fotos-ig/%`, `${ORIGEN}fotos-ig/%`],
-  );
-  const ks = [...new Set(urls.map((x) => clave(x.u)).filter(Boolean))];
-  const items = ks.filter((k) => !enR2.has(k)).map((k) => ({ k }));
-  console.log(`Fotos IG (Hostinger): en R2 ${enR2.size}, faltan ${items.length} (de ${ks.length})`);
+  const ks = new Set();
+  const esFotoIg = (u) => typeof u === "string" && u.startsWith(`${ORIGEN}fotos-ig/`);
+  while (faseH === "fotos_reales" && !agotado() && quedaTiempo()) {
+    const [r, o] = desdeH ?? ["", -1];
+    const filas = await consultar("SELECT restaurante_id AS r, orden AS o, url AS u FROM fotos_reales WHERE (restaurante_id, orden) > (?, ?) ORDER BY restaurante_id, orden LIMIT ?", [r, o, TRAMO]);
+    for (const f of filas) if (esFotoIg(f.u)) ks.add(clave(f.u));
+    if (filas.length < TRAMO) pasarFase();
+    else desdeH = [filas.at(-1).r, filas.at(-1).o];
+  }
+  while (faseH === "publicaciones" && !agotado() && quedaTiempo()) {
+    const filas = await consultar("SELECT id, media_url AS m, portada_url AS p FROM publicaciones WHERE id > ? ORDER BY id LIMIT ?", [desdeH ?? "", TRAMO]);
+    for (const f of filas) for (const u of [f.m, f.p]) if (esFotoIg(u)) ks.add(clave(u));
+    if (filas.length < TRAMO) pasarFase();
+    else desdeH = filas.at(-1).id;
+  }
+  ks.delete(null);
+  const items = [...ks].filter((k) => !enR2.has(k)).map((k) => ({ k }));
+  console.log(`Fotos IG (Hostinger): en R2 ${enR2.size}, faltan ${items.length} de ${ks.size} en lo recorrido`);
   quedan += Math.max(0, items.length - TOPE.fotos);
   quedan += await copiarDeHostinger("fotos", items.slice(0, TOPE.fotos), H_PAUSA);
+}
+if (hayHostinger) {
+  // Si el recorrido quedó a mitad, la cadena del workflow sigue desde el cursor. Si se completó, la cadena para aunque
+  // hayan quedado archivos por encima de los topes: los toma la vuelta del día siguiente (así no gira todo el día
+  // recorriendo las tablas otra vez).
+  quedan = faseH === "fin" ? 0 : 1;
+  await guardarCursor(CURSOR_H, faseH === "fin" ? { fase: "videos", desde: null, completo: true } : { fase: faseH, desde: desdeH });
+  console.log(`Hostinger → R2: ${faseH === "fin" ? "recorrido completo" : `sigue la próxima corrida desde ${faseH} ${JSON.stringify(desdeH)}`} · ${resumenLecturas()}`);
 }
 
 // ---------- 4) Directos de Instagram → R2 ----------
@@ -303,53 +344,133 @@ async function achicar(b, nombre) {
 }
 
 if (RECUPERAR) {
-  // Fotos de Instagram (vencidas o no) cuya copia ya está en fotos-ig/<id>.jpg (fotos-ig-copia la registró en
-  // fotos_reales): la publicación pasa a apuntar a la copia. Sólo ids que el Worker de medios acepta.
-  const { cambios } = await d1(
-    `UPDATE publicaciones SET media_url = ? || id || '.jpg', vence_en = ?
-     WHERE plataforma = 'instagram' AND tipo = 'foto' AND (media_url LIKE '%cdninstagram%' OR media_url LIKE '%fbcdn%')
-       AND id NOT GLOB '*[^A-Za-z0-9._-]*'
-       AND (? || id || '.jpg') IN (SELECT url FROM fotos_reales WHERE url LIKE ?)`,
-    [`${MEDIA}fotos-ig/`, NO_VENCE, `${ORIGEN}fotos-ig/`, `${ORIGEN}fotos-ig/%`],
-  );
-  resumen.recuperadas_por_copia_en_hostinger = cambios;
-  console.log(`Recuperar: ${cambios} fotos de Instagram re-apuntadas a su copia de fotos-ig/`);
+  // 18/11: el UPDATE … LIKE de antes (340 k filas, 1,6 s por llamada) ya no hace falta: las copias de Hostinger
+  // (fotos-ig/<id>.jpg) están en R2 con la misma clave, y el paso de directos re-apunta todo lo que ya está en R2.
+  console.log("Recuperar: lo cubre el re-apuntado de lo que ya está en R2 (sin barrer publicaciones).");
+}
+
+/**
+ * Arma la cola de directos desde los índices parciales (migración app 0036), paginada por (vence_en, clave) de a 500.
+ * barrido = false: sólo lo vivo (vence en más de 10 min). barrido = true: todo lo pendiente (también vencidos y sin
+ * fecha), para re-apuntar lo vencido que ya está en R2 y armar la lista de vencidos para anonyig.
+ */
+async function armarColaDirectos(barrido) {
+  const ahora = Date.now();
+  const desdeVivo = new Date(ahora + 10 * 60_000).toISOString();
+  const [enR2v, enR2f] = await Promise.all([listarR2("videos-ig/"), listarR2("fotos-ig/")]);
+  const todos = [];
+  const cuenta = { videos_sin_copia: 0, fotos_en_cdn: 0, paginas: 0, cortada_por_tope: false };
+  // Publicaciones (videos y fotos). Los EXISTS sólo se calculan para los videos (CASE corta).
+  const fPub = (p) => {
+    if (p.tipo === "video") {
+      if (String(p.id).startsWith("tv-") || !p.media_url || Number(p.copia) === 1) return;
+      if (!(Number(p.oculta) === 0 || Number(p.eleg) === 1 || Number(p.pend) === 1)) return;
+      cuenta.videos_sin_copia++;
+      todos.push({ tipo: "video", id: String(p.id), rid: String(p.restaurante_id), url: String(p.media_url), eleg: Number(p.eleg) === 1, vence: venceDe(p.media_url, p.vence_en), k: `videos-ig/${limpio(p.id)}.mp4` });
+    } else if (Number(p.oculta) === 0) {
+      cuenta.fotos_en_cdn++;
+      todos.push({ tipo: "foto", id: String(p.id), rid: String(p.restaurante_id), url: String(p.media_url), vence: venceDe(p.media_url, p.vence_en), k: `fotos-ig/${limpio(p.id)}.jpg` });
+    }
+  };
+  const colsPub = `id, restaurante_id, tipo, oculta, media_url, vence_en,
+    CASE WHEN tipo = 'video' THEN EXISTS (SELECT 1 FROM videos_elegidos e WHERE e.publicacion_id = p.id) END AS eleg,
+    CASE WHEN tipo = 'video' THEN EXISTS (SELECT 1 FROM videos_revision v WHERE v.publicacion_id = p.id AND v.accion = 'pendiente') END AS pend,
+    CASE WHEN tipo = 'video' THEN EXISTS (SELECT 1 FROM videos_copia c WHERE c.publicacion_id = p.id) END AS copia`;
+  let cur = [barrido ? "" : desdeVivo, ""];
+  for (;;) {
+    const filas = await consultar(
+      `SELECT ${colsPub} FROM publicaciones p WHERE ${COLA_PUBLICACIONES} AND (vence_en, id) > (?, ?) AND vence_en < '${NO_VENCE}' ORDER BY vence_en, id LIMIT ?`,
+      [cur[0], cur[1], PAGINA],
+    );
+    cuenta.paginas++;
+    filas.forEach(fPub);
+    if (filas.length < PAGINA) break;
+    if (agotado()) { cuenta.cortada_por_tope = true; break; }
+    cur = [filas.at(-1).vence_en, filas.at(-1).id];
+  }
+  if (barrido && !agotado()) {
+    // Sin fecha de vencimiento (NULL queda fuera del rango de arriba).
+    for (let desde = ""; ; ) {
+      const filas = await consultar(`SELECT ${colsPub} FROM publicaciones p WHERE ${COLA_PUBLICACIONES} AND vence_en IS NULL AND id > ? ORDER BY id LIMIT ?`, [desde, PAGINA]);
+      filas.forEach(fPub);
+      if (filas.length < PAGINA || agotado()) break;
+      desde = filas.at(-1).id;
+    }
+  }
+  // fotos_reales de Instagram.
+  const fFr = (f) => {
+    cuenta.fotos_en_cdn++;
+    todos.push({ tipo: "foto_real", id: `${f.restaurante_id}#${f.orden}`, rid: String(f.restaurante_id), orden: f.orden, url: String(f.url), vence: venceDe(f.url, f.vence_en), k: `fotos-ig/fr-${limpio(f.restaurante_id)}-${hash(f.url).toString(16)}.jpg` });
+  };
+  let cf = [barrido ? "" : desdeVivo, "", -1];
+  while (!agotado()) {
+    const filas = await consultar(
+      `SELECT restaurante_id, orden, url, vence_en FROM fotos_reales WHERE ${COLA_FOTOS_REALES} AND (vence_en, restaurante_id, orden) > (?, ?, ?) AND vence_en < '${NO_VENCE}' ORDER BY vence_en, restaurante_id, orden LIMIT ?`,
+      [cf[0], cf[1], cf[2], PAGINA],
+    );
+    cuenta.paginas++;
+    filas.forEach(fFr);
+    if (filas.length < PAGINA) break;
+    if (agotado()) { cuenta.cortada_por_tope = true; break; }
+    const u = filas.at(-1);
+    cf = [u.vence_en, u.restaurante_id, u.orden];
+  }
+  if (barrido && !agotado()) {
+    for (let d = ["", -1]; ; ) {
+      const filas = await consultar(`SELECT restaurante_id, orden, url, vence_en FROM fotos_reales WHERE ${COLA_FOTOS_REALES} AND vence_en IS NULL AND (restaurante_id, orden) > (?, ?) ORDER BY restaurante_id, orden LIMIT ?`, [d[0], d[1], PAGINA]);
+      filas.forEach(fFr);
+      if (filas.length < PAGINA || agotado()) break;
+      d = [filas.at(-1).restaurante_id, filas.at(-1).orden];
+    }
+  }
+  // Lo que ya está en R2 se re-apunta aunque el link haya vencido (recupera); lo vivo se copia por orden de vencimiento.
+  const vivo = (x) => x.vence > ahora + 10 * 60_000;
+  const enR2 = (x) => (x.tipo === "video" ? enR2v.get(x.k) : enR2f.get(x.k));
+  const items = [];
+  const vencidos = [];
+  for (const x of todos) {
+    const b = enR2(x);
+    if (b !== undefined) items.push({ ...x, r2: b });
+    else if (vivo(x)) items.push(x);
+    else vencidos.push(x);
+  }
+  // Primero los que ya están en R2 (sólo re-apuntar), después los vivos del que vence antes al que vence después.
+  items.sort((a, b) => (b.r2 !== undefined) - (a.r2 !== undefined) || (a.r2 === undefined ? a.vence - b.vence : 0));
+  return { items, vencidos, cuenta };
 }
 
 if (TOPE.directos > 0 && quedaTiempo()) {
   const MAX_ARCHIVO = 60 * 1024 ** 2;
-  const ahora = Date.now();
-  const [enR2v, enR2f] = await Promise.all([listarR2("videos-ig/"), listarR2("fotos-ig/")]);
-  const videos = await consultar(
-    `SELECT p.id, p.restaurante_id, p.media_url, p.portada_url, p.vence_en, (p.id IN (SELECT publicacion_id FROM videos_elegidos)) AS eleg FROM publicaciones p
-     WHERE p.tipo = 'video' AND p.plataforma = 'instagram' AND p.id NOT LIKE 'tv-%' AND coalesce(p.media_url,'') <> ''
-       AND (p.oculta = 0 OR p.id IN (SELECT publicacion_id FROM videos_elegidos) OR p.id IN (SELECT publicacion_id FROM videos_revision WHERE accion = 'pendiente'))
-       AND NOT EXISTS (SELECT 1 FROM videos_copia c WHERE c.publicacion_id = p.id)`,
-  );
-  const fotos = await consultar(
-    `SELECT id, restaurante_id, media_url, vence_en FROM publicaciones
-     WHERE tipo = 'foto' AND plataforma = 'instagram' AND oculta = 0 AND (media_url LIKE '%cdninstagram%' OR media_url LIKE '%fbcdn%')`,
-  );
-  const fotosReales = await consultar(
-    `SELECT restaurante_id, orden, url, vence_en FROM fotos_reales WHERE fuente LIKE 'instagram%' AND (url LIKE '%cdninstagram%' OR url LIKE '%fbcdn%')`,
-  );
-  const todos = [
-    ...videos.map((p) => ({ tipo: "video", id: String(p.id), rid: String(p.restaurante_id), url: String(p.media_url), portada: p.portada_url, eleg: Number(p.eleg) === 1, vence: venceDe(p.media_url, p.vence_en), k: `videos-ig/${limpio(p.id)}.mp4` })),
-    ...fotos.map((p) => ({ tipo: "foto", id: String(p.id), rid: String(p.restaurante_id), url: String(p.media_url), vence: venceDe(p.media_url, p.vence_en), k: `fotos-ig/${limpio(p.id)}.jpg` })),
-    ...fotosReales.map((f) => ({ tipo: "foto_real", id: `${f.restaurante_id}#${f.orden}`, rid: String(f.restaurante_id), orden: f.orden, url: String(f.url), vence: venceDe(f.url, f.vence_en), k: `fotos-ig/fr-${limpio(f.restaurante_id)}-${hash(f.url).toString(16)}.jpg` })),
-  ];
-  const yaEnR2 = (x) => (x.tipo === "video" ? enR2v.has(x.k) : enR2f.has(x.k));
-  const vivo = (x) => x.vence > ahora + 10 * 60_000;
-  // Lo que ya está en R2 se re-apunta aunque el link haya vencido (recupera); lo vivo se copia por orden de vencimiento.
-  const mios = todos.filter((x) => hash(x.id) % PARTES === PARTE);
-  const cola = [...mios.filter(yaEnR2), ...mios.filter((x) => !yaEnR2(x) && vivo(x)).sort((a, b) => a.vence - b.vence)];
-  const vencidos = todos.filter((x) => !yaEnR2(x) && !vivo(x));
+  const NOMBRE_COLA = "a-r2-directos";
+  let cola;
+  if (ARMAR_COLA || PARTES === 1) {
+    const { items, vencidos, cuenta } = await armarColaDirectos(BARRIDO);
+    console.log(`Cola de directos${BARRIDO ? " (barrido)" : ""}: ${cuenta.videos_sin_copia} videos sin copia + ${cuenta.fotos_en_cdn} fotos en el CDN · a trabajar ${items.length} · vencidos sin copia ${vencidos.length}${cuenta.cortada_por_tope ? " · CORTADA por el tope de filas" : ""} · ${resumenLecturas()}`);
+    // Marca para el lector de anonyig: comercios con contenido vencido sin copia (sólo el barrido ve los vencidos).
+    if (BARRIDO && !cuenta.cortada_por_tope)
+      await d1("INSERT INTO ia_config (clave, valor, actualizado_en) VALUES (?, ?, ?) ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor, actualizado_en = excluded.actualizado_en", [
+        "r2_directos_vencidos",
+        JSON.stringify({ en: new Date().toISOString(), restaurantes: [...new Set(vencidos.filter((x) => (x.tipo === "video" ? x.eleg : true)).map((x) => x.rid))] }),
+        new Date().toISOString(),
+      ]);
+    if (ARMAR_COLA) {
+      await guardarCola(NOMBRE_COLA, items, { cuenta, vencidos: vencidos.length });
+      console.log(`Cola guardada en R2 (control/colas/${NOMBRE_COLA}.json) para las partes.`);
+      if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `quedan=${items.length}\n`);
+      process.exit(0);
+    }
+    cola = items;
+  } else {
+    const c = await leerCola(NOMBRE_COLA);
+    if (!c) {
+      console.log("No está la cola de esta corrida en R2 (el job «cola» no la armó): nada que hacer.");
+      if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, "quedan=0\n");
+      process.exit(0);
+    }
+    cola = c.items.filter((x) => hash(x.id) % PARTES === PARTE);
+  }
   const est = (resumen.directos = {
     parte: `${PARTE + 1}/${PARTES}`,
-    videos_sin_copia: videos.length,
-    fotos_en_cdn: fotos.length + fotosReales.length,
-    vivos_total: todos.filter((x) => !yaEnR2(x) && vivo(x)).length,
-    vencidos_total: vencidos.length,
     cola_parte: cola.length,
     reapuntados: 0,
     videos: 0,
@@ -362,8 +483,10 @@ if (TOPE.directos > 0 && quedaTiempo()) {
     proximo_vencimiento: "",
     corte: "",
   });
-  console.log(`Directos ${est.parte}: ${videos.length} videos sin copia + ${est.fotos_en_cdn} fotos en el CDN · vivos ${est.vivos_total} · vencidos ${vencidos.length} · cola de esta parte ${cola.length} · tope ${TOPE.directos}`);
+  console.log(`Directos ${est.parte}: cola de esta parte ${cola.length} · tope ${TOPE.directos}`);
   const negados = new Set();
+  const yaEnR2 = (x) => x.r2 !== undefined;
+  const vivo = (x) => x.vence > Date.now() + 10 * 60_000;
 
   // Las filas se anotan de a tandas (una consulta a D1 cada ~40), no una por archivo: menos pedidos a api.cloudflare.com.
   const porAnotar = { video: [], foto: [], foto_real: [] };
@@ -401,7 +524,7 @@ if (TOPE.directos > 0 && quedaTiempo()) {
 
   async function uno(x) {
     if (yaEnR2(x)) {
-      await apuntar(x, x.tipo === "video" ? enR2v.get(x.k) : enR2f.get(x.k));
+      await apuntar(x, x.r2);
       est.reapuntados++;
       return;
     }
@@ -468,6 +591,7 @@ if (TOPE.directos > 0 && quedaTiempo()) {
     Array.from({ length: Math.max(1, Math.min(S3 ? IG_A_LA_VEZ_PEDIDO : Math.min(2, IG_A_LA_VEZ_PEDIDO), lista.length)) }, async () => {
       while (i < lista.length && !est.corte && quedaTiempo()) {
         const x = lista[i++];
+        if (!yaEnR2(x) && !vivo(x)) continue; // venció mientras esperaba en la cola
         try {
           await uno(x);
           seguidos = 0;
@@ -484,19 +608,13 @@ if (TOPE.directos > 0 && quedaTiempo()) {
   );
   await anotar().catch((e) => console.log(`  error al anotar la última tanda: ${e instanceof Error ? e.message : e}`));
   const restantes = cola.slice(i).filter(vivo);
-  est.proximo_vencimiento = restantes.length ? new Date(restantes[0].vence).toISOString() : "";
-  quedan += cola.length - i;
+  est.proximo_vencimiento = restantes.length ? new Date(Math.min(...restantes.map((x) => x.vence))).toISOString() : "";
+  // Un corte por errores no cuenta como trabajo pendiente: la cadena no se relanza en seguida (antes giraba cada 20 min
+  // cortando a los 3 errores); sigue el horario.
+  if (!est.corte.startsWith("3 errores")) quedan += cola.length - i;
   est.mb_bajados = Math.round(est.mb_bajados);
   est.mb_subidos = Math.round(est.mb_subidos);
   est.minutos = Math.round((Date.now() - t0) / 60000);
-  // Marca para el lector de anonyig: comercios con contenido vencido sin copia (la parte 0 escribe la lista completa;
-  // cada parte suma los que Instagram negó).
-  if (PARTE === 0)
-    await d1("INSERT INTO ia_config (clave, valor, actualizado_en) VALUES (?, ?, ?) ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor, actualizado_en = excluded.actualizado_en", [
-      "r2_directos_vencidos",
-      JSON.stringify({ en: new Date().toISOString(), restaurantes: [...new Set(vencidos.filter((x) => x.tipo === "video" ? x.eleg : true).map((x) => x.rid))] }),
-      new Date().toISOString(),
-    ]);
   if (negados.size)
     await d1("INSERT INTO ia_config (clave, valor, actualizado_en) VALUES (?, ?, ?) ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor, actualizado_en = excluded.actualizado_en", [
       `r2_directos_negados_${PARTE}`,
@@ -506,5 +624,5 @@ if (TOPE.directos > 0 && quedaTiempo()) {
   console.log(`directos: ${JSON.stringify(est)}`);
 }
 rmSync(tmp, { recursive: true, force: true });
-console.log(`\nListo en ${Math.round((Date.now() - t0) / 60000)} min · quedan ${quedan}: ${JSON.stringify(resumen)}`);
+console.log(`\nListo en ${Math.round((Date.now() - t0) / 60000)} min · quedan ${quedan} · ${resumenLecturas()}: ${JSON.stringify(resumen)}`);
 if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `quedan=${quedan}\n`);

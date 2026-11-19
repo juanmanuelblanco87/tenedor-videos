@@ -5,6 +5,14 @@
 // (pedidos_completitud, tipo video_instagram). Sin dependencias: Node 22 + yt-dlp + ffmpeg.
 // Claves (secretos del repo): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, D1_APP_ID, D1_FONDO_ID, HOSTINGER_API_TOKEN,
 // HOSTINGER_USUARIO. Uso: node motor.mjs [--minutos 330] [--a-la-vez 4] [--por-local 2] [--max N]
+// 18/11/2026 (infra ágil, etapa 5: topes a D1): la cola ya no barre publicaciones entera (245 k filas por llamada).
+//   · --solo-directos --solo-a-mas (copiar-directos, cada 20 min y a toda hora porque los links vencen): parte de los
+//     elegidos de los comercios A+ de ESTA parte (clave de videos_elegidos) → unas centenas de filas;
+//   · --ids: sólo esas publicaciones (clave primaria);
+//   · el motor completo: cola por el índice parcial publicaciones_cola_copia (migración app 0036), por clave
+//     (vence_en, id) de a 500 y con tope de filas por corrida; no corre en las horas pico de la app;
+//   · el tope de disco de Hostinger se lee de ia_config «hostinger_videos_bytes» (se recalcula cada 6 h sobre el índice
+//     parcial videos_copia_hostinger_bytes) y las copias por comercio sólo de los comercios de la cola.
 import { execFile } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,6 +20,7 @@ import { join } from "node:path";
 import { createHash, createHmac } from "node:crypto";
 import { promisify } from "node:util";
 import { portadaDeVideo } from "./portada.mjs";
+import { COLA_PUBLICACIONES, HOSTINGER_VIDEOS, agotado, d1Base, exigirIndices, hash, resumenLecturas, salirSiPico } from "./d1.mjs";
 
 const ejecutar = promisify(execFile);
 const arg = (n, def) => {
@@ -33,25 +42,8 @@ const DOMINIO = env.HOSTINGER_DOMINIO || "datos.tenedor.com.ar";
 const t0 = Date.now();
 const espera = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
-// ---------- D1 por la API REST (reintenta si la base está sobrecargada) ----------
-async function d1(base, sql, params = [], intento = 0) {
-  const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/d1/database/${base}/query`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "content-type": "application/json" },
-    body: JSON.stringify({ sql, params }),
-    signal: AbortSignal.timeout(60_000),
-  });
-  const j = await r.json().catch(() => null);
-  if (!r.ok || !j?.success) {
-    const m = `D1 ${r.status} ${j?.errors?.map((e) => e.message).join("; ") ?? ""}`;
-    if ((r.status === 429 || /overloaded/i.test(m)) && intento < 4) {
-      await espera([3_000, 8_000, 15_000, 30_000][intento]);
-      return d1(base, sql, params, intento + 1);
-    }
-    throw new Error(m);
-  }
-  return j.result?.[0]?.results ?? [];
-}
+// ---------- D1 (d1.mjs: reintentos, filas leídas por llamada y tope por corrida) ----------
+const d1 = async (base, sql, params = []) => (await d1Base(base, sql, params)).filas;
 
 // ---------- Hostinger (API de archivos, TUS) ----------
 let sesion = null;
@@ -167,21 +159,53 @@ if (!SOLO_DIRECTOS && !IDS.size && Number.isFinite(ultimoCorte) && Date.now() - 
 }
 
 // ---------- La cola ----------
+if (!SOLO_DIRECTOS && !IDS.size) salirSiPico(`motor parte ${PARTE + 1}/${PARTES}`);
+await exigirIndices(["videos_elegidos_publicacion", "videos_copia_hostinger_bytes", ...(SOLO_DIRECTOS || IDS.size ? [] : ["publicaciones_cola_copia"])], `motor parte ${PARTE + 1}/${PARTES}`);
 const pendientesMeta = new Set(
   (await d1(env.D1_FONDO_ID, "SELECT DISTINCT restaurante_id FROM pedidos_completitud WHERE tipo = 'video_instagram' AND estado = 'pendiente'")).map((x) => String(x.restaurante_id)),
 );
-const filas = await d1(
-  env.D1_APP_ID,
-  `SELECT p.id, p.restaurante_id, p.permalink, p.media_url, p.portada_url, p.vence_en, (p.id IN (SELECT publicacion_id FROM videos_elegidos)) AS eleg, coalesce(lp.nivel, 'C') AS nivel FROM publicaciones p LEFT JOIN locales_prioridad lp ON lp.restaurante_id = p.restaurante_id
-   WHERE p.tipo = 'video' AND p.plataforma = 'instagram' AND (NOT p.oculta OR p.id IN (SELECT publicacion_id FROM videos_revision WHERE accion = 'pendiente')) AND p.permalink LIKE 'https://www.instagram.com/%'
-     AND (p.vence_en <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+20 minutes')
-          -- 08/11: también los ELEGIDOS sin copia aunque figuren vigentes (su link de descarga ya no anda y la copia del
-          -- Worker los saltea como «vencidos» hasta que Meta lo renueve; yt-dlp baja por el permalink).
-          OR p.id IN (SELECT publicacion_id FROM videos_elegidos))
-     AND NOT EXISTS (SELECT 1 FROM videos_copia c WHERE c.publicacion_id = p.id)
-     ${SOLO_DIRECTOS ? "AND p.id IN (SELECT publicacion_id FROM videos_elegidos) AND p.vence_en > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+10 minutes') AND p.vence_en < '2099-01-01'" : ""}
-   ORDER BY CASE lp.nivel WHEN 'S' THEN 0 WHEN 'A' THEN 1 ELSE 2 END, lp.puntaje DESC, p.publicado_en DESC`,
-);
+// A+ (dueño 09/11): top 300 A por puntaje (ia_config nivel_a_mas), 6 videos como los S. --solo-a-mas: copia sólo esos
+// (para el resto los videos siguen frenados por el disco de Hostinger).
+const SOLO_A_MAS = process.argv.includes("--solo-a-mas");
+const aMasFila = (await d1(env.D1_APP_ID, "SELECT valor FROM ia_config WHERE clave = 'nivel_a_mas'"))[0];
+const aMas = new Set(aMasFila ? JSON.parse(String(aMasFila.valor)).ids : []);
+// Columnas y condiciones de siempre. «eleg» por el índice videos_elegidos_publicacion (0036) y la revisión pendiente por
+// la clave de videos_revision, sin recorrer ninguna de las dos tablas.
+const COLS = `p.id, p.restaurante_id, p.permalink, p.media_url, p.portada_url, p.vence_en, lp.puntaje, coalesce(lp.nivel, 'C') AS nivel,
+  EXISTS (SELECT 1 FROM videos_elegidos e2 WHERE e2.publicacion_id = p.id) AS eleg`;
+const CONDS = `p.tipo = 'video' AND p.plataforma = 'instagram' AND p.permalink LIKE 'https://www.instagram.com/%'
+  AND (NOT p.oculta OR EXISTS (SELECT 1 FROM videos_revision v WHERE v.publicacion_id = p.id AND v.accion = 'pendiente'))
+  AND NOT EXISTS (SELECT 1 FROM videos_copia c WHERE c.publicacion_id = p.id)`;
+const VIVO = "p.vence_en > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+10 minutes') AND p.vence_en < '2099-01-01'";
+const VENCE_PRONTO = Date.now() + 20 * 60_000;
+const vencePronto = (x) => Date.parse(x.vence_en ?? "") <= VENCE_PRONTO;
+let filas = [];
+if (IDS.size) {
+  filas = (await d1(env.D1_APP_ID, `SELECT ${COLS} FROM publicaciones p LEFT JOIN locales_prioridad lp ON lp.restaurante_id = p.restaurante_id
+    WHERE p.id IN (SELECT value FROM json_each(?)) AND ${CONDS}`, [JSON.stringify([...IDS])])).filter((x) => vencePronto(x) || Number(x.eleg) === 1);
+} else if (SOLO_DIRECTOS && SOLO_A_MAS) {
+  // Sólo los elegidos de los A+ que le tocan a esta parte (el reparto es por comercio): consulta chica, por clave.
+  const mios = [...aMas].filter((id) => hash(String(id)) % PARTES === PARTE);
+  for (let k = 0; k < mios.length; k += 200)
+    filas.push(...(await d1(env.D1_APP_ID, `SELECT ${COLS} FROM videos_elegidos e JOIN publicaciones p ON p.id = e.publicacion_id LEFT JOIN locales_prioridad lp ON lp.restaurante_id = p.restaurante_id
+      WHERE e.restaurante_id IN (SELECT value FROM json_each(?)) AND ${CONDS} AND ${VIVO}`, [JSON.stringify(mios.slice(k, k + 200))])));
+} else {
+  // Cola por el índice parcial: lo de Instagram que sigue en el CDN, por (vence_en, id). Entran los vencidos (o por
+  // vencer en 20 min) y los elegidos aunque estén vigentes (08/11: su link de descarga ya no anda y la copia del Worker
+  // los saltea como «vencidos»; yt-dlp baja por el permalink). Para por el tope de filas de la corrida.
+  const cola = COLA_PUBLICACIONES.replace("plataforma", "p.plataforma").replace(/media_url/g, "p.media_url");
+  for (let cur = ["", ""]; ; ) {
+    const pag = await d1(env.D1_APP_ID, `SELECT ${COLS} FROM publicaciones p LEFT JOIN locales_prioridad lp ON lp.restaurante_id = p.restaurante_id
+      WHERE ${cola} AND (p.vence_en, p.id) > (?, ?) AND p.vence_en < '2100-01-01T00:00:00.000Z' AND ${CONDS}
+      ORDER BY p.vence_en, p.id LIMIT 500`, cur);
+    filas.push(...pag.filter((x) => (SOLO_DIRECTOS ? Number(x.eleg) === 1 && !vencePronto(x) && x.vence_en < "2099-01-01" : vencePronto(x) || Number(x.eleg) === 1)));
+    if (pag.length < 500 || agotado()) break;
+    cur = [pag.at(-1).vence_en, pag.at(-1).id];
+  }
+}
+// Mismo orden que antes: S, A, el resto; dentro, por puntaje.
+const rango = (x) => ({ S: 0, A: 1 })[x.nivel] ?? 2;
+filas.sort((a, b) => rango(a) - rango(b) || Number(b.puntaje ?? 0) - Number(a.puntaje ?? 0));
 // 07/11 (dueño: «armá las mejoras del motor»): primero UN video de cada comercio que todavía no tiene ninguno (cada
 // video suma un comercio con video), después el resto, hasta POR_LOCAL. Y la lista se reparte entre varias máquinas
 // (--partes N --parte k, por comercio): cada una tiene su IP y Instagram corta por IP.
@@ -189,14 +213,15 @@ const filas = await d1(
 // POR NIVEL contando las que el comercio ya tiene VISIBLES (10/11: las que sacó el revisor liberan su lugar), también para los elegidos (antes no tenían tope y llenaron el disco).
 // Lo que excedía se archivó en el repo privado tenedor-videos-archivo y se borró de Hostinger.
 const TOPE_NIVEL = { S: 6, A: 3 };
-// A+ (dueño 09/11): top 300 A por puntaje (ia_config nivel_a_mas), 6 videos como los S. --solo-a-mas: copia sólo esos
-// (para el resto los videos siguen frenados por el disco de Hostinger).
-const SOLO_A_MAS = process.argv.includes("--solo-a-mas");
-const aMasFila = (await d1(env.D1_APP_ID, "SELECT valor FROM ia_config WHERE clave = 'nivel_a_mas'"))[0];
-const aMas = new Set(aMasFila ? JSON.parse(String(aMasFila.valor)).ids : []);
 const tope = (nivel, id) => Math.min(aMas.has(id) ? 6 : (TOPE_NIVEL[nivel] ?? 1), POR_LOCAL);
-const copiasDe = new Map((await d1(env.D1_APP_ID, "SELECT c.restaurante_id, count(*) AS c FROM videos_copia c JOIN publicaciones p ON p.id = c.publicacion_id WHERE p.oculta = 0 OR p.id IN (SELECT publicacion_id FROM videos_revision WHERE accion = 'pendiente') GROUP BY c.restaurante_id")).map((x) => [String(x.restaurante_id), Number(x.c)]));
-const hash = (s) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
+// Copias visibles por comercio, sólo de los comercios de la cola (índice videos_copia_rest), de a 200.
+const copiasDe = new Map();
+const ridsCola = [...new Set(filas.map((x) => String(x.restaurante_id)))].filter((id) => hash(id) % PARTES === PARTE);
+for (let k = 0; k < ridsCola.length; k += 200)
+  for (const x of await d1(env.D1_APP_ID, `SELECT c.restaurante_id, count(*) AS c FROM videos_copia c JOIN publicaciones p ON p.id = c.publicacion_id
+      WHERE c.restaurante_id IN (SELECT value FROM json_each(?)) AND (p.oculta = 0 OR EXISTS (SELECT 1 FROM videos_revision v WHERE v.publicacion_id = p.id AND v.accion = 'pendiente'))
+      GROUP BY c.restaurante_id`, [JSON.stringify(ridsCola.slice(k, k + 200))]))
+    copiasDe.set(String(x.restaurante_id), Number(x.c));
 const porLocal = new Map();
 const elegibles = filas
   .filter((x) => !IDS.size || IDS.has(String(x.id)))
@@ -212,7 +237,7 @@ const elegibles = filas
   .filter((x) => IDS.size || x.n <= tope(x.nivel, String(x.restaurante_id)))
   .filter((x) => !SOLO_A_MAS || aMas.has(String(x.restaurante_id)));
 const cola = [...elegibles.filter((x) => x.n === 1), ...elegibles.filter((x) => x.n > 1 && Number(x.eleg) === 1), ...elegibles.filter((x) => x.n > 1 && Number(x.eleg) !== 1)].slice(0, MAX);
-console.log(`Videos vencidos sin copia: ${filas.length} · parte ${PARTE + 1}/${PARTES}: ${cola.length} (${elegibles.filter((x) => x.n === 1).length} de comercios sin ningún video primero; hasta ${POR_LOCAL} por comercio, de a ${A_LA_VEZ}, ${MINUTOS} min)`);
+console.log(`${resumenLecturas()} · videos sin copia en la cola: ${filas.length} · parte ${PARTE + 1}/${PARTES}: ${cola.length} (${elegibles.filter((x) => x.n === 1).length} de comercios sin ningún video primero; hasta ${POR_LOCAL} por comercio, de a ${A_LA_VEZ}, ${MINUTOS} min)`);
 
 const est = { copiados: 0, sinLink: 0, grandes: 0, errores: 0, mbAntes: 0, mbDespues: 0, primerError: "" };
 // 10/11 (dueño: «mantenemos a Hostinger en un máximo de 45 GB»): tope de disco. ia_config «hostinger_tope»
@@ -221,7 +246,21 @@ const est = { copiados: 0, sinLink: 0, grandes: 0, errores: 0, mbAntes: 0, mbDes
 const topeFila = (await d1(env.D1_APP_ID, "SELECT valor FROM ia_config WHERE clave = 'hostinger_tope'"))[0];
 const topeDisco = topeFila ? JSON.parse(String(topeFila.valor)) : { total_gb: 45, otros_gb: 12 };
 // 12/11: sólo lo que está en Hostinger (los directos copiados a R2 por a-r2.mjs no ocupan su disco).
-const usados = Number((await d1(env.D1_APP_ID, "SELECT coalesce(sum(bytes),0) AS b FROM videos_copia WHERE url LIKE ?", [`https://${DOMINIO}/%`]))[0]?.b ?? 0);
+// 18/11: la suma se guarda en ia_config «hostinger_videos_bytes» y se recalcula cada 6 h sobre el índice parcial
+// videos_copia_hostinger_bytes (unas 12 k filas); en el medio, cada copia a Hostinger suma sus bytes. Antes cada parte
+// sumaba videos_copia entera en cada corrida (cada 20 min).
+const CLAVE_BYTES = "hostinger_videos_bytes";
+const cacheBytes = (await d1(env.D1_APP_ID, "SELECT valor FROM ia_config WHERE clave = ?", [CLAVE_BYTES]))[0];
+const cb = cacheBytes ? JSON.parse(String(cacheBytes.valor)) : null;
+let usados = Number(cb?.bytes ?? NaN);
+if (!Number.isFinite(usados) || !(Date.now() - Date.parse(cb?.calculado_en ?? "") < 6 * 3600_000)) {
+  usados = Number((await d1(env.D1_APP_ID, `SELECT coalesce(sum(bytes),0) AS b FROM videos_copia WHERE ${HOSTINGER_VIDEOS}`))[0]?.b ?? 0);
+  await d1(env.D1_APP_ID, "INSERT INTO ia_config (clave, valor, actualizado_en) VALUES (?, ?, ?) ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor, actualizado_en = excluded.actualizado_en", [
+    CLAVE_BYTES,
+    JSON.stringify({ bytes: usados, calculado_en: new Date().toISOString() }),
+    new Date().toISOString(),
+  ]);
+}
 let libres = (Number(topeDisco.total_gb) - Number(topeDisco.otros_gb)) * 1e9 - usados;
 console.log(`Disco Hostinger: videos ${(usados / 1e9).toFixed(1)} GB · tope para videos ${Number(topeDisco.total_gb) - Number(topeDisco.otros_gb)} GB · libres ${(libres / 1e9).toFixed(1)} GB`);
 if (libres <= 0) {
@@ -275,6 +314,8 @@ async function copiar(p) {
     "INSERT INTO videos_copia (publicacion_id, restaurante_id, url, bytes, copiado_en) VALUES (?, ?, ?, ?, ?) ON CONFLICT (publicacion_id) DO UPDATE SET url = excluded.url, bytes = excluded.bytes, copiado_en = excluded.copiado_en",
     [p.id, p.restaurante_id, url, final.length, new Date().toISOString()],
   );
+  if (!A_R2)
+    await d1(env.D1_APP_ID, "UPDATE ia_config SET valor = json_set(valor, '$.bytes', coalesce(json_extract(valor, '$.bytes'), 0) + ?) WHERE clave = ?", [final.length, CLAVE_BYTES]).catch(() => null);
   est.copiados++;
   est.mbAntes += b.length / 1024 ** 2;
   est.mbDespues += final.length / 1024 ** 2;
@@ -325,4 +366,4 @@ if (cortado) {
   console.log(`CORTÓ: ${cortado}`);
   await d1(env.D1_APP_ID, "INSERT INTO ia_config (clave, valor, actualizado_en) VALUES (?, ?, ?) ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor, actualizado_en = excluded.actualizado_en", [CLAVE_CORTE, JSON.stringify({ en: new Date().toISOString(), copiados: est.copiados }), new Date().toISOString()]);
 }
-console.log(`\nListo en ${Math.round((Date.now() - t0) / 60000)} min: ${JSON.stringify({ ...est, mbAntes: Math.round(est.mbAntes), mbDespues: Math.round(est.mbDespues), comercios: copiados.size, aLaColaDeMeta: aCola.length })}`);
+console.log(`\nListo en ${Math.round((Date.now() - t0) / 60000)} min · ${resumenLecturas()}: ${JSON.stringify({ ...est, mbAntes: Math.round(est.mbAntes), mbDespues: Math.round(est.mbDespues), comercios: copiados.size, aLaColaDeMeta: aCola.length })}`);

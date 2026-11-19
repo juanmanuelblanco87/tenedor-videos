@@ -6,10 +6,13 @@
 # Worker quedan con próxima revisión 2000-01-01 (PDF_PARA_GITHUB) y este encargado las toma PRIMERO; acá cartas.mjs
 # registra el lector de PDF (src/lib/pdf-cartas.ts: texto con unpdf y páginas dibujadas con @napi-rs/canvas).
 # cartas.mjs se arma en tenedor-infra con «npm run cartas:paquete».
+# 18/11/2026 (infra ágil, etapa 5: topes a D1): sólo fuera de las horas pico de la app (01, 03, 05, 07, 09, 15 y 17 h de
+# Buenos Aires; antes cada 2 h a toda hora) y la cola de cartas usa el índice parcial restaurantes_carta_proxima_idx
+# (antes leía 65 k filas por parte: «coalesce(carta_url,'')» no coincidía con la condición del índice).
 name: cartas
 on:
   schedule:
-    - cron: "5 */2 * * *"
+    - cron: "5 4,6,8,10,12,18,20 * * *"
   workflow_dispatch:
 concurrency:
   group: cartas

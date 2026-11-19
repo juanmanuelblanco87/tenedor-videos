@@ -1,6 +1,9 @@
 # Copia de videos con link directo vigente (09/11/2026): los elegidos que trae el lector de anonyig ya vienen con el MP4
 # directo. motor.mjs --solo-directos los baja, achica y sube a Hostinger SIN pedirle nada a Instagram (no hay bloqueos
 # por IP), así que puede correr cada 20 min (lo lanza la vigilancia; el schedule de GitHub no es confiable).
+# 18/11/2026 (infra ágil, etapa 5: topes a D1): sigue cada 20 min y a toda hora (los links vencen), pero con consultas
+# chicas por clave: los elegidos de los A+ de cada parte (unas centenas de filas, antes 245 k por llamada) y el disco de
+# Hostinger desde ia_config (se recalcula cada 6 h sobre un índice parcial). Ver motor.mjs y d1.mjs.
 name: copiar-directos
 on:
   schedule:

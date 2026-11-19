@@ -1,5 +1,9 @@
 # Revisor de videos con IA instalable gratuita (Ollama + LFM3-VL 2B) en las máquinas de GitHub (09/11/2026).
 # 16 partes en paralelo, tandas de hasta 5 h. Lanzar a mano (GitHub no dispara bien los horarios).
+# 18/11/2026 (infra ágil, etapa 5: topes a D1): el job «cola» arma la lista UNA vez (pendientes por el índice parcial de
+# la migración app 0036 + visibles sin revisión por clave, con cursor y tope de 40 k filas) y la deja en R2; las 16 partes
+# la leen de ahí (antes cada una leía 151 k filas). Si la cola está vacía, las partes no arrancan. Fuera de las horas pico
+# de la app (11 a 15 y 19 a 24 h de Buenos Aires): no arranca y, si entra en el pico, corta.
 name: revisar
 on:
   workflow_dispatch:
@@ -8,7 +12,25 @@ on:
         description: "modelo de Ollama"
         default: "lfm3-vl:2b"
 jobs:
+  cola:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      items: ${{ steps.cola.outputs.items }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Armar la cola (una sola vez por corrida)
+        id: cola
+        run: node revisar.mjs --armar-cola --tope-filas 40000 || echo "items=0" >> "$GITHUB_OUTPUT"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_APP_ID: ${{ secrets.D1_APP_ID }}
   revisar:
+    needs: cola
+    if: needs.cola.outputs.items != '' && needs.cola.outputs.items != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 330
     strategy:

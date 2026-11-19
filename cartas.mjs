@@ -120572,7 +120572,7 @@ var consulta = VACIAS ? `SELECT r.id FROM locales_prioridad lp JOIN restaurantes
        AND NOT EXISTS (SELECT 1 FROM platos p WHERE p.restaurante_id = r.id) AND (r.carta_proxima_revision IS NULL OR r.carta_proxima_revision <= ?)
      ORDER BY lp.nivel DESC, lp.puntaje DESC` : (
   // Primero los PDF que dejó el Worker (próxima revisión = PDF_PARA_GITHUB; 18/11, infra ágil etapa 3), después las nunca leídas.
-  "SELECT id FROM restaurantes WHERE estado = 'prospecto' AND coalesce(carta_url,'') <> '' AND (carta_proxima_revision IS NULL OR carta_proxima_revision <= ?) ORDER BY carta_proxima_revision IS ? DESC, carta_leida_en IS NOT NULL, id"
+  "SELECT id FROM restaurantes INDEXED BY restaurantes_carta_proxima_idx WHERE carta_url <> '' AND estado = 'prospecto' AND (carta_proxima_revision IS NULL OR carta_proxima_revision <= ?) ORDER BY carta_proxima_revision IS ? DESC, carta_leida_en IS NOT NULL, id"
 );
 var { results } = await (VACIAS ? db.prepare(consulta).bind(ahora3) : db.prepare(consulta).bind(ahora3, PDF_PARA_GITHUB2)).all();
 var hash2 = (s2) => [...s2].reduce((h2, c2) => h2 * 31 + c2.charCodeAt(0) >>> 0, 7);

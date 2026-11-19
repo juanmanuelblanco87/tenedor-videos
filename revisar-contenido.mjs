@@ -12,6 +12,12 @@
 // --repasar (C7, recuperar los «foto quieta» que se perdieron): revisa también los ya anotados; no toca la lista de R2.
 // Va en tandas con --max y fuera del horario pico de la app (antecedente de la base saturada del 31/10).
 // Uso: node revisar-contenido.mjs [--partes 4 --parte k] [--minutos 45] [--max N] [--simular] [--repasar] [--ids id1,id2]
+// 18/11/2026 (infra ágil, etapa 5: topes a D1): antes cada parte leía videos_elegidos × videos_copia entera (72 k filas
+// por llamada) cada 3 horas. Ahora la lista la arma UNA máquina (--armar-cola, job «cola» de revisar-contenido.yml)
+// recorriendo videos_elegidos por clave en tramos de 1.000 (≈2 k filas por llamada) y la deja en R2; las partes la leen
+// de ahí. Corre una vez por día, fuera de las horas pico de la app.
+import { appendFileSync } from "node:fs";
+import { agotado, consultar, guardarCola, guardarCursor, leerCola, leerCursor, resumenLecturas, salirSiPico } from "./d1.mjs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -31,19 +37,9 @@ const espera = (ms) => new Promise((ok) => setTimeout(ok, ms));
 const CF = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}`;
 const aut = { authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}` };
 
-async function d1(sql, params = [], intento = 0) {
-  const r = await fetch(`${CF}/d1/database/${env.D1_APP_ID}/query`, { method: "POST", headers: { ...aut, "content-type": "application/json" }, body: JSON.stringify({ sql, params }), signal: AbortSignal.timeout(60_000) });
-  const j = await r.json().catch(() => null);
-  if (!r.ok || !j?.success) {
-    const m = `D1 ${r.status} ${j?.errors?.map((e) => e.message).join("; ") ?? ""}`;
-    if ((r.status === 429 || /overloaded/i.test(m)) && intento < 4) {
-      await espera([3_000, 8_000, 15_000, 30_000][intento]);
-      return d1(sql, params, intento + 1);
-    }
-    throw new Error(m);
-  }
-  return j.result[0].results;
-}
+const d1 = (sql, params = []) => consultar(sql, params);
+const ARMAR_COLA = process.argv.includes("--armar-cola");
+if (!IDS.length) salirSiPico(ARMAR_COLA ? "revisar-contenido (cola)" : `revisar-contenido parte ${PARTE + 1}/${PARTES}`);
 const CONTROL = `${CF}/r2/buckets/tenedor-media/objects/control/revision-contenido-${PARTE}.json`;
 async function leerHechos() {
   const r = await fetch(CONTROL, { headers: aut });
@@ -75,10 +71,54 @@ async function medir(url) {
   return { tipo, W, H, cw, ch, dur, quieto: Math.round(quieto * 10) / 10 };
 }
 
+const NOMBRE_COLA = "revisar-contenido";
+/**
+ * Verticales elegidos con copia, recorriendo videos_elegidos por clave (tramos de 1.000) hasta el tope de filas. Si el
+ * tope corta, el cursor (ia_config «revisar_contenido_cursor») hace que la corrida siguiente siga desde ahí.
+ */
+const CURSOR = "revisar_contenido_cursor";
+async function armarCola() {
+  const items = [];
+  let completo = false;
+  for (let k = (await leerCursor(CURSOR)).desde ?? ["", ""]; ; ) {
+    const tramo = await d1(
+      `WITH t AS (SELECT restaurante_id, publicacion_id, vertical FROM videos_elegidos WHERE (restaurante_id, publicacion_id) > (?, ?) ORDER BY restaurante_id, publicacion_id LIMIT 1000)
+       SELECT t.publicacion_id AS id, t.restaurante_id, t.vertical, c.url FROM t LEFT JOIN videos_copia c ON c.publicacion_id = t.publicacion_id AND t.vertical = 1`,
+      k,
+    );
+    items.push(...tramo.filter((f) => Number(f.vertical) === 1 && f.url && !String(f.id).startsWith("tv-")).map(({ vertical, ...x }) => x));
+    if (tramo.length < 1000) {
+      completo = true;
+      break;
+    }
+    k = [tramo.at(-1).restaurante_id, tramo.at(-1).id];
+    if (agotado()) {
+      if (!SIMULAR) await guardarCursor(CURSOR, { desde: k });
+      break;
+    }
+  }
+  if (completo && !SIMULAR) await guardarCursor(CURSOR, { desde: null, vuelta_completa: true });
+  console.log(`Cola: ${items.length} verticales con copia${completo ? "" : " (cortada por el tope de filas: sigue la próxima corrida)"} · ${resumenLecturas()}`);
+  return items;
+}
+if (ARMAR_COLA) {
+  const items = await armarCola();
+  await guardarCola(NOMBRE_COLA, items);
+  if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `items=${items.length}\n`);
+  process.exit(0);
+}
 const hechos = await leerHechos();
-const filas = IDS.length
-  ? await d1(`SELECT e.publicacion_id id, e.restaurante_id, c.url FROM videos_elegidos e JOIN videos_copia c ON c.publicacion_id = e.publicacion_id WHERE e.publicacion_id IN (SELECT value FROM json_each(?))`, [JSON.stringify(IDS)])
-  : await d1(`SELECT e.publicacion_id id, e.restaurante_id, c.url FROM videos_elegidos e JOIN videos_copia c ON c.publicacion_id = e.publicacion_id WHERE e.vertical = 1 AND e.publicacion_id NOT LIKE 'tv-%'`);
+let filas;
+if (IDS.length)
+  filas = await d1(`SELECT e.publicacion_id id, e.restaurante_id, c.url FROM videos_elegidos e JOIN videos_copia c ON c.publicacion_id = e.publicacion_id WHERE e.publicacion_id IN (SELECT value FROM json_each(?))`, [JSON.stringify(IDS)]);
+else if (PARTES > 1) {
+  const guardada = await leerCola(NOMBRE_COLA);
+  if (!guardada) {
+    console.log("No está la cola de esta corrida en R2 (el job «cola» no la armó): nada que hacer.");
+    process.exit(0);
+  }
+  filas = guardada.items;
+} else filas = await armarCola();
 const mias = filas.filter((f) => IDS.length || (hash(f.id) % PARTES === PARTE && (REPASAR || !hechos.has(f.id))));
 console.log(`Verticales con copia: ${filas.length} · parte ${PARTE + 1}/${PARTES}: ${mias.length} por revisar (${hechos.size} ya revisados)`);
 const total = { vertical: 0, franjas: 0, foto: 0, horizontal: 0, errores: 0 };

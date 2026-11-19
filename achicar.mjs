@@ -3,6 +3,10 @@
 // celular tardaban en arrancar. Por cada uno: baja de Hostinger (no toca Instagram), lo achica al formato del motor
 // (576 px, ~1,2 Mbps, faststart) y lo vuelve a subir con el MISMO nombre (el link no cambia); actualiza bytes.
 // Uso: node achicar.mjs [--partes 4 --parte k] [--mb 4] [--minutos 50] [--a-la-vez 2] [--max N]
+// 18/11/2026 (infra ágil, etapa 5: topes a D1): la lista sale del índice parcial videos_copia_hostinger_bytes (migración
+// app 0036: sólo los videos que siguen en Hostinger, ordenados por tamaño) con LIMIT, en vez de recorrer videos_copia
+// entera en cada parte; y no corre en las horas pico de la app.
+import { HOSTINGER_VIDEOS, d1Base, exigirIndices, resumenLecturas, salirSiPico } from "./d1.mjs";
 import { execFile } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,25 +29,10 @@ for (const k of ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "D1_APP_ID", "
 const DOMINIO = env.HOSTINGER_DOMINIO || "datos.tenedor.com.ar";
 const t0 = Date.now();
 const espera = (ms) => new Promise((ok) => setTimeout(ok, ms));
-// ---------- D1 por la API REST (reintenta si la base está sobrecargada) ----------
-async function d1(base, sql, params = [], intento = 0) {
-  const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/d1/database/${base}/query`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "content-type": "application/json" },
-    body: JSON.stringify({ sql, params }),
-    signal: AbortSignal.timeout(60_000),
-  });
-  const j = await r.json().catch(() => null);
-  if (!r.ok || !j?.success) {
-    const m = `D1 ${r.status} ${j?.errors?.map((e) => e.message).join("; ") ?? ""}`;
-    if ((r.status === 429 || /overloaded/i.test(m)) && intento < 4) {
-      await espera([3_000, 8_000, 15_000, 30_000][intento]);
-      return d1(base, sql, params, intento + 1);
-    }
-    throw new Error(m);
-  }
-  return j.result?.[0]?.results ?? [];
-}
+// ---------- D1 (d1.mjs) ----------
+const d1 = async (base, sql, params = []) => (await d1Base(base, sql, params)).filas;
+salirSiPico(`achicar parte ${PARTE + 1}/${PARTES}`);
+await exigirIndices(["videos_copia_hostinger_bytes"], `achicar parte ${PARTE + 1}/${PARTES}`);
 
 // ---------- Hostinger (API de archivos, TUS) ----------
 let sesion = null;
@@ -110,7 +99,8 @@ async function achicar(b, limpio) {
 }
 
 const hash = (s) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
-const filas = await d1(env.D1_APP_ID, "SELECT publicacion_id, url, bytes FROM videos_copia WHERE bytes > ? AND url LIKE ? ORDER BY bytes DESC", [MB * 1024 ** 2, `https://${DOMINIO}/videos-ig/%`]);
+// Los más pesados primero; tope de 5.000 por corrida (cada parte se queda con ~1/4 y en 50 min hace bastante menos).
+const filas = await d1(env.D1_APP_ID, `SELECT publicacion_id, url, bytes FROM videos_copia WHERE ${HOSTINGER_VIDEOS} AND bytes > ? ORDER BY bytes DESC LIMIT 5000`, [MB * 1024 ** 2]);
 // Los que ffmpeg no logra achicar al menos 15 % (ya están en baja calidad) se anotan y no se vuelven a intentar.
 // 09/11 (disco lleno; dueño aprobó la segunda pasada): 480 px / 0,8 Mbps; lista «sin mejora» nueva para esta calidad.
 const CLAVE_SIN_MEJORA = `achicar_sin_mejora_480_${PARTE}`;
@@ -165,4 +155,4 @@ await Promise.all(
 );
 rmSync(tmp, { recursive: true, force: true });
 await d1(env.D1_APP_ID, "INSERT INTO ia_config (clave, valor, actualizado_en) VALUES (?, ?, ?) ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor, actualizado_en = excluded.actualizado_en", [CLAVE_SIN_MEJORA, JSON.stringify([...sinMejora]), new Date().toISOString()]);
-console.log(`\nListo en ${Math.round((Date.now() - t0) / 60000)} min: ${JSON.stringify({ ...est, mbAntes: Math.round(est.mbAntes), mbDespues: Math.round(est.mbDespues), quedan: cola.length - i })}`);
+console.log(`\nListo en ${Math.round((Date.now() - t0) / 60000)} min · ${resumenLecturas()}: ${JSON.stringify({ ...est, mbAntes: Math.round(est.mbAntes), mbDespues: Math.round(est.mbDespues), quedan: cola.length - i })}`);
