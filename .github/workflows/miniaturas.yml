@@ -1,10 +1,10 @@
 # Miniaturas de 160 px en R2 (miniaturas.mjs, 15/11/2026): una chica al lado de cada foto de fotos-ig/ y fotos-gm/, y
 # rehace las portadas chicas que eran grandes. Saltea lo ya hecho. Corre acá (repo público, minutos sin tope) porque el
-# repo privado se quedó sin minutos. Corre sola todos los días 04:30 AR (schedule; a mano: gh workflow run miniaturas.yml).
+# repo privado se quedó sin minutos. Corre sola todos los días 07:40 AR, después de a-r2 (05:10 AR), así las fotos que pasan de Hostinger a R2 tienen su chica el mismo día (19/11) (schedule; a mano: gh workflow run miniaturas.yml).
 name: miniaturas
 on:
   schedule:
-    - cron: "30 7 * * *"
+    - cron: "40 10 * * *"
   workflow_dispatch:
     inputs:
       max: { description: "Tope (0 = todas)", required: false, default: "0" }
