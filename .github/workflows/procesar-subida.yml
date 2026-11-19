@@ -3,12 +3,16 @@
 # workflow_dispatch al recibir una subida (PAT con sólo actions:write, R5); si el disparo falla, el cron de la app
 # (tenedor-subidas) lo vuelve a disparar a los 30 min (C6). El schedule es el respaldo. Un disparo procesa todas las
 # «recibida» (agrupado) y se vuelve a lanzar solo mientras queden. Apagar: variable del repo SUBIDAS = apagado.
+# 19/11: el respaldo pasa de cada 2 h a cada 10 min (un link quedó horas en «recibida»: GitHub atrasa los schedule y la
+# última corrida automática había sido 8 h antes). Cada corrida arranca con «revisar»: UNA consulta por el índice
+# subidas_estado (hay-subidas.mjs, sin instalar nada); con la cola vacía termina ahí, en segundos. Lo pesado (ffmpeg,
+# yt-dlp) sólo corre si hay algo, o si se disparó a mano / desde la app (workflow_dispatch siempre procesa).
 # Log sólo con contadores (R4: el repo es público). Sale siempre con 0 (sin mails de GitHub).
 name: procesar-subida
 on:
   workflow_dispatch:
   schedule:
-    - cron: "45 */2 * * *"
+    - cron: "*/10 * * * *"
 concurrency:
   group: procesar-subida
   cancel-in-progress: false
@@ -16,8 +20,25 @@ permissions:
   actions: write
   contents: read
 jobs:
-  procesar:
+  revisar:
     if: vars.SUBIDAS != 'apagado'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      hay: ${{ steps.hay.outputs.hay }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: hay-subidas.mjs, sparse-checkout-cone-mode: false }
+      - name: ¿Hay subidas?
+        id: hay
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_APP_ID: ${{ secrets.D1_APP_ID }}
+        run: node hay-subidas.mjs
+  procesar:
+    needs: revisar
+    if: vars.SUBIDAS != 'apagado' && (github.event_name == 'workflow_dispatch' || needs.revisar.outputs.hay == '1')
     runs-on: ubuntu-latest
     timeout-minutes: 50
     env:

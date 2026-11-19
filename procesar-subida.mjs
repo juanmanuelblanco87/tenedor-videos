@@ -208,6 +208,15 @@ async function procesar(s) {
 }
 
 // ---------- vuelta ----------
+// 19/11: lo que quedó «procesando» más de 1 h es de una corrida que se cortó (el job dura 50 min como mucho y la
+// concurrencia es de a una): vuelve a la cola contando un intento (al 3.º, «fallo»). Así no depende de la tarea
+// tenedor-subidas de la app, que está apagada.
+const haceUnaHora = new Date(Date.now() - 60 * 60_000).toISOString();
+await d1(
+  `UPDATE subidas SET estado = CASE WHEN intentos + 1 >= ? THEN 'fallo' ELSE 'recibida' END, intentos = intentos + 1, actualizado_en = ?
+     WHERE estado = 'procesando' AND actualizado_en < ?`,
+  [INTENTOS_MAX, ahora(), haceUnaHora],
+).catch(() => {});
 const est = { tomadas: 0, ok: 0, reintento: 0, fallo: 0 };
 while (quedaTiempo() && est.tomadas < MAXIMO) {
   const lote = await d1(
