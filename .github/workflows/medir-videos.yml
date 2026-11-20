@@ -1,0 +1,31 @@
+# Medida de los videos nuevos (medir-videos.mjs, 19/11/2026 noche): ffprobe sobre nuestra copia (y sobre el link de
+# Instagram de los que todavía no tienen copia) para que ningún video entre al feed sin medida (3.130 sin medida el
+# 19/11). Corre sola cada 2 h fuera de las horas pico de la app (el script sale solo en pico) y a mano:
+# gh workflow run medir-videos.yml. Repo público: minutos sin tope.
+name: medir-videos
+on:
+  schedule:
+    - cron: "25 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      max: { description: "Tope de videos por corrida", required: false, default: "3000" }
+      prueba: { description: "Sólo medir, sin escribir (true/false)", required: false, default: "false" }
+concurrency:
+  group: medir-videos
+  cancel-in-progress: false
+jobs:
+  medir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_APP_ID: ${{ secrets.D1_APP_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: ffprobe
+        run: command -v ffprobe || (sudo apt-get update -q && sudo apt-get install -y -q ffmpeg)
+      - name: Medir
+        run: node medir-videos.mjs --max "${{ inputs.max || '3000' }}" --paralelo 6 --tope-filas 60000 ${{ inputs.prueba == 'true' && '--prueba' || '' }}
