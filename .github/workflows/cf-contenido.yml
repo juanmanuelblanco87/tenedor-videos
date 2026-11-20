@@ -1,0 +1,45 @@
+# 20/11/2026 (dueño: «OK con A»): MUDADA desde juanmanuelblanco87/tenedor (privado, frenado por el pago de GitHub)
+# a este repo público (minutos gratis). El código sigue privado: se baja con una deploy key de SÓLO LECTURA
+# (secreto TENEDOR_DEPLOY_KEY), rama tareas-github. Los registros de cada corrida son públicos.
+# Auditoría de contenido del clon de Cloudflare (producción desde el 02/11): oculta los posteos que no son comida
+# (texto → píxeles → IA gratis si hay duda). Necesita @napi-rs/canvas, por eso corre acá y no en el Worker.
+# Vive en main porque GitHub sólo programa (schedule) los workflows de la rama principal; el código sale de la rama
+# `cloudflare`. Cada 3 h (dueño 02/11): el repo es privado y tiene 2.000 min/mes gratis; cada 30 min se pasaba.
+# Secretos: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, HOSTINGER_API_TOKEN y las claves de IA gratis
+# (GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY: las carga el dueño con cargar-claves-github.cmd).
+name: cf-contenido
+on:
+  schedule:
+    # 13/11 (sin minutos gratis de GitHub): cada 6 h.
+    - cron: "10 */2 * * *"   # 20/11: cada 2 h (repo público, minutos gratis)
+  workflow_dispatch:
+concurrency:
+  group: cf-contenido
+  cancel-in-progress: false
+jobs:
+  correr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { repository: juanmanuelblanco87/tenedor, ref: tareas-github, ssh-key: ${{ secrets.TENEDOR_DEPLOY_KEY }} }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci --no-audit --no-fund
+      - name: Ids de las bases D1 (no son secretos; salen de wrangler.jsonc)
+        run: |
+          for b in app fondo hechos; do
+            id=$(grep -o "\"database_name\": \"tenedor-$b\", \"database_id\": \"[0-9a-f-]*\"" wrangler.jsonc | grep -o '[0-9a-f-]\{36\}')
+            test -n "$id" || { echo "sin id de tenedor-$b"; exit 1; }
+            echo "D1_$(echo $b | tr a-z A-Z)_ID=$id" >> "$GITHUB_ENV"
+          done
+      - name: Auditoría de contenido
+        run: npx tsx --conditions=react-server scripts/cf/fondo-github.mts --tarea contenido

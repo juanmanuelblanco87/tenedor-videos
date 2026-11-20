@@ -1,0 +1,73 @@
+# 20/11/2026 (dueño: «OK con A»): MUDADA desde juanmanuelblanco87/tenedor (privado, frenado por el pago de GitHub)
+# a este repo público (minutos gratis). El código sigue privado: se baja con una deploy key de SÓLO LECTURA
+# (secreto TENEDOR_DEPLOY_KEY), rama tareas-github. Los registros de cada corrida son públicos.
+# Imagen REAL de los comercios sin imagen (cascada de src/app/api/cron/imagenes: og:image de la web propia con dos votos
+# de la IA de visión gratis, carta y la ficha de Google sin cargo). Dueño 03/11: «al menos 1 imagen por comercio
+# gastronómico debe ser prioridad» / «adelante con todos los caminos gratis». Necesita @napi-rs/canvas: corre acá.
+# Vive en main porque GitHub sólo programa los workflows de la rama principal; el código sale de `cloudflare`.
+# Cada 3 h (a los :52, desfasado de cf-contenido): ~3 min por vuelta; el repo privado tiene 2.000 min/mes gratis.
+# Secretos: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, HOSTINGER_API_TOKEN y las claves de IA gratis
+# (GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY: las carga el dueño con cargar-claves-github.cmd).
+name: cf-imagenes
+on:
+  schedule:
+    # 13/11 (sin minutos gratis de GitHub: cada vuelta tardaba ~30 min y se comía el cupo): una vez por día, 04:52 ART.
+    - cron: "52 */3 * * *"   # 20/11: cada 3 h otra vez (repo público, minutos gratis)
+  workflow_dispatch:
+concurrency:
+  group: cf-imagenes
+  cancel-in-progress: false
+jobs:
+  correr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { repository: juanmanuelblanco87/tenedor, ref: tareas-github, ssh-key: ${{ secrets.TENEDOR_DEPLOY_KEY }} }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci --no-audit --no-fund
+      - name: Ids de las bases D1 (no son secretos; salen de wrangler.jsonc)
+        run: |
+          for b in app fondo hechos; do
+            id=$(grep -o "\"database_name\": \"tenedor-$b\", \"database_id\": \"[0-9a-f-]*\"" wrangler.jsonc | grep -o '[0-9a-f-]\{36\}')
+            test -n "$id" || { echo "sin id de tenedor-$b"; exit 1; }
+            echo "D1_$(echo $b | tr a-z A-Z)_ID=$id" >> "$GITHUB_ENV"
+          done
+      - name: Imagen real de los comercios sin imagen
+        run: npx tsx --conditions=react-server scripts/cf/fondo-github.mts --tarea imagenes
+      # 06/11: el recuento nocturno de auditoría (tenedor-auditoria) no entra en la memoria del Worker (~180 MB de 128):
+      # corre acá, una vez por día argentino (si ya está la fila de hoy en auditoria_historial, sale enseguida).
+      - name: Recuento de auditoría (una vez por día)
+        if: always()
+        timeout-minutes: 15
+        run: npx tsx --conditions=react-server scripts/cf/auditoria-github.mts
+      # 03/11 (dueño: «hacé las 3 en ese orden»): lo que el sistema viejo hacía cada hora y no corría en Cloudflare. Van
+      # en el mismo trabajo para no gastar otra instalación (minutos de GitHub).
+      - name: Copia propia de las fotos de Instagram antes de que venzan
+        if: always()
+        run: npx tsx --conditions=react-server scripts/cf/fondo-github.mts --tarea fotos-ig-copia --query "max=150&links=500&segundos=600"
+      - name: Foto de perfil de Facebook (pública) de los comercios sin imagen
+        if: always()
+        run: npx tsx --conditions=react-server scripts/cf/fondo-github.mts --tarea fb-fotos --query "max=80"
+      # 05/11 (auditoría de la mudanza): el lector de cartas (tenedor-cartas, ~4,5 min por vuelta) no corría en ningún
+      # lado desde el 01/11. 4 de las 8 vueltas del día (01, 07, 13, 19 UTC) para no pasar los 2.000 min/mes de GitHub.
+      - name: Lector de cartas (PDF y fotos de carta)
+        if: always()
+        run: |
+          case "$(date -u +%H)" in 01|07|13|19) ;; *) [ "${{ github.event_name }}" = workflow_dispatch ] || { echo "no es hora de cartas"; exit 0; } ;; esac
+          npx tsx --conditions=react-server scripts/cf/fondo-github.mts --tarea cartas
+      - name: Portadas de los videos copiados que todavía no tienen
+        if: always()
+        timeout-minutes: 8 # 05/11: sin tope colgaba la corrida entera hasta cancelarla
+        run: |
+          sudo apt-get install -y -qq ffmpeg >/dev/null
+          npx tsx scripts/cf/portadas-videos.mts --dias 3
