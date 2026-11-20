@@ -12,7 +12,7 @@
 //   - videos (elegidos, visibles o en revisión) sin copia: se bajan, se achican como achicar.mjs (480 px, 0,8 Mbps,
 //     faststart), van a R2 videos-ig/<id>.mp4 y se anotan en videos_copia con la URL de media.tenedor.com.ar (igual que
 //     la copia propia de siempre: el disparador deja la publicación «no vence»). Portada (cuadro de 0,5 s de la copia,
-//     portada.mjs) a R2 y a Hostinger (la app todavía la arma con datos.tenedor.com.ar/portadas-ig/).
+//     portada.mjs) a R2 (20/11: ya no a Hostinger; la app la arma con media.tenedor.com.ar, src/lib/portada-propia.ts).
 //   - fotos (publicaciones tipo foto visibles y fotos_reales de Instagram): van a R2 fotos-ig/<id>.jpg y la fila pasa a
 //     apuntar a media.tenedor.com.ar con vence_en 2100 (no hay tabla de copias de fotos: el feed lee media_url directo).
 //   - Si el archivo ya está en R2 (copia anterior, o la fila la volvió a pisar un lector con un link nuevo), no se baja:
@@ -39,12 +39,12 @@
 //     («a_r2_hostinger_cursor»): cada corrida sigue donde quedó la anterior;
 //   · no corre en las horas pico de la app (11 a 15 y 19 a 24 h de Buenos Aires).
 import { execFile } from "node:child_process";
-import { createHash, createHmac } from "node:crypto";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { portadaDeVideo } from "./portada.mjs";
+import { hayS3, listarR2, subirR2 } from "./r2.mjs";
 import { COLA_FOTOS_REALES, COLA_PUBLICACIONES, NO_VENCE, HOSTINGER_VIDEOS, agotado, consultar, d1Base, exigirIndices, guardarCola, guardarCursor, hash, leerCola, leerCursor, resumenLecturas, salirSiPico } from "./d1.mjs";
 
 const ejecutar = promisify(execFile);
@@ -108,41 +108,8 @@ const d1 = async (sql, params = []) => {
   return { filas, cambios };
 };
 
-// ---------- R2 por la API REST ----------
-async function listarR2(prefijo) {
-  const m = new Map();
-  let cursor = "";
-  for (;;) {
-    const r = await fetch(`${R2}?per_page=1000&prefix=${prefijo}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { headers: auth, signal: AbortSignal.timeout(60_000) });
-    const j = await r.json();
-    if (!j.success) throw new Error(`listar R2 ${prefijo}: ${j.errors?.map((e) => e.message).join("; ")}`);
-    for (const o of j.result ?? []) m.set(o.key, o.size);
-    cursor = j.result_info?.cursor ?? "";
-    if (!cursor || String(j.result_info?.is_truncated) === "false") break;
-  }
-  return m;
-}
-// Subida: por la API S3 de R2 si están R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT (no cuenta para el límite de
-// 1.200 pedidos cada 5 min de api.cloudflare.com, que comparten D1 y los demás procesos); si no, por la API REST, y ante
-// un 429 espera (30 s, 60 s, 120 s) en vez de insistir: el 12/11 las 4 partes juntas lo tocaron (≈330 «R2 429»).
-const S3 = env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY && env.R2_ENDPOINT ? { id: env.R2_ACCESS_KEY_ID, secreto: env.R2_SECRET_ACCESS_KEY, base: env.R2_ENDPOINT.replace(/\/$/, "") } : null;
-const hmac = (k, d) => createHmac("sha256", k).update(d).digest();
-const sha = (d) => createHash("sha256").update(d).digest("hex");
-const cod = (x) => encodeURIComponent(x).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-function putS3(k, cuerpo, tipo) {
-  const url = new URL(`${S3.base}/${BUCKET}/${k.split("/").map(cod).join("/")}`);
-  const fecha = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
-  const dia = fecha.slice(0, 8);
-  const h = { "content-type": tipo, host: url.host, "x-amz-content-sha256": "UNSIGNED-PAYLOAD", "x-amz-date": fecha };
-  const firmados = Object.keys(h).sort().join(";");
-  const canonico = ["PUT", url.pathname, "", ...Object.keys(h).sort().map((x) => `${x}:${h[x]}`), "", firmados, "UNSIGNED-PAYLOAD"].join("\n");
-  const alcance = `${dia}/auto/s3/aws4_request`;
-  const aFirmar = ["AWS4-HMAC-SHA256", fecha, alcance, sha(canonico)].join("\n");
-  const llave = hmac(hmac(hmac(hmac(`AWS4${S3.secreto}`, dia), "auto"), "s3"), "aws4_request");
-  const firma = createHmac("sha256", llave).update(aFirmar).digest("hex");
-  const { host, ...resto } = h;
-  return fetch(url, { method: "PUT", headers: { ...resto, authorization: `AWS4-HMAC-SHA256 Credential=${S3.id}/${alcance}, SignedHeaders=${firmados}, Signature=${firma}` }, body: cuerpo, signal: AbortSignal.timeout(180_000) });
-}
+// ---------- R2 (r2.mjs: API S3 si hay claves, si no REST con espera ante 429) ----------
+const S3 = hayS3;
 // Sin claves S3, la copia de Hostinger (no urgente: Hostinger ya sirve esos archivos) no corre, para dejarle el cupo de
 // api.cloudflare.com a los directos (que vencen); y los directos bajan a 2 a la vez por parte.
 if (!S3 && process.argv.includes("--requiere-s3")) {
@@ -150,47 +117,6 @@ if (!S3 && process.argv.includes("--requiere-s3")) {
   if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, "quedan=0\n");
   process.exit(0);
 }
-async function subirR2(k, cuerpo, tipo) {
-  for (let intento = 0; ; intento++) {
-    const p = await (S3
-      ? putS3(k, cuerpo, tipo)
-      : fetch(`${R2}/${k.split("/").map(encodeURIComponent).join("/")}`, { method: "PUT", headers: { ...auth, "content-type": tipo }, body: cuerpo, signal: AbortSignal.timeout(180_000) })
-    ).catch((e) => ({ ok: false, status: String(e?.name ?? e), text: async () => "" }));
-    if (p.ok) return;
-    const st = String(p.status);
-    if (intento >= 3 || !/^(429|5\d\d|TimeoutError|TypeError)$/.test(st)) throw new Error(`R2 ${st} ${(await p.text()).slice(0, 200)}`);
-    await espera(st === "429" ? 30_000 * 2 ** intento : 3_000 * (intento + 1));
-  }
-}
-
-// ---------- Hostinger (sólo para la portada de los directos; API de archivos, TUS) ----------
-let sesion = null;
-async function subirHostinger(nombre, contenido, reintento = false) {
-  if (!env.HOSTINGER_API_TOKEN || !env.HOSTINGER_USUARIO) return;
-  for (let intento = 0; !sesion; intento++) {
-    const r = await fetch("https://developers.hostinger.com/api/hosting/v1/files/upload-urls", {
-      method: "POST",
-      headers: { authorization: `Bearer ${env.HOSTINGER_API_TOKEN}`, "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify({ username: env.HOSTINGER_USUARIO, domain: DOMINIO }),
-      signal: AbortSignal.timeout(20_000),
-    }).catch((e) => ({ ok: false, status: String(e?.name ?? e) }));
-    if (r.ok) sesion = await r.json();
-    else if (intento >= 2) throw new Error(`upload-urls: ${r.status}`);
-    else await espera(5_000 * 2 ** intento);
-  }
-  const destino = `${sesion.url.replace(/\/$/, "")}/${nombre}?override=true`;
-  const comunes = { "X-Auth": sesion.auth_key, "X-Auth-Rest": sesion.rest_auth_key, "Tus-Resumable": "1.0.0" };
-  const crear = await fetch(destino, { method: "POST", headers: { ...comunes, "Upload-Length": String(contenido.length) }, signal: AbortSignal.timeout(20_000) });
-  const enviar = crear.ok
-    ? await fetch(destino, { method: "PATCH", headers: { ...comunes, "Upload-Offset": "0", "Content-Type": "application/offset+octet-stream" }, body: new Uint8Array(contenido), signal: AbortSignal.timeout(60_000) })
-    : crear;
-  if (!enviar.ok) {
-    sesion = null;
-    if (reintento) throw new Error(`subida Hostinger: ${enviar.status}`);
-    return subirHostinger(nombre, contenido, true);
-  }
-}
-
 // ---------- Fase genérica Hostinger → R2 ----------
 let hostingerFrenado = "";
 const resumen = {};
@@ -560,7 +486,6 @@ if (TOPE.directos > 0 && quedaTiempo()) {
         const p05 = await portadaDeVideo(archivo);
         for (const [n, jpg] of [[`portadas-ig/${limpio(x.id)}.jpg`, p05.grande], [`portadas-ig/${limpio(x.id)}-160.jpg`, p05.chica]]) {
           await subirR2(n, jpg, "image/jpeg").catch(() => null);
-          await subirHostinger(n, jpg).catch(() => null);
         }
       } catch {
         // sin portada propia por ahora

@@ -1,0 +1,58 @@
+# Respaldo fuera de Cloudflare en Hostinger, tope 45 GB (respaldo.mjs + respaldo.php de tenedor-cf-ig, 20/11/2026).
+# Semanal, domingo 04:30 de Buenos Aires (07:30 UTC, fuera de pico): export de las 3 D1 por rowid (no bloquea la base),
+# medios relevantes incrementales (adheridos → S → A por puntaje, hasta llenar el tope) y rotación (4 semanales + 3
+# mensuales; 3 bundles de código). El primer domingo de cada mes suma el código (git bundle).
+# MODO PRUEBA mientras la variable del repo RESPALDO_ESCRIBIR no sea «si» (la prende el dueño cuando respaldo.php esté
+# publicado y los secretos RESPALDO_URL / RESPALDO_SECRET cargados). Gratis: repo público. Sale siempre con 0.
+name: respaldo
+on:
+  schedule:
+    - cron: "30 7 * * 0"
+  workflow_dispatch:
+    inputs:
+      que: { description: "Partes (--d1 --medios --rotar --codigo --podar --estado)", required: false, default: "--d1 --medios --rotar" }
+      escribir: { description: "si = escribe en Hostinger (si no, modo prueba)", required: false, default: "no" }
+concurrency:
+  group: respaldo
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  respaldo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      RESPALDO_URL: ${{ secrets.RESPALDO_URL }}
+      RESPALDO_SECRET: ${{ secrets.RESPALDO_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      # El código de la app (privado), con la deploy key de SÓLO LECTURA que ya usa cf-contenido.yml: todas las ramas,
+      # para el bundle del código y para sacar los ids de las 3 D1 de wrangler.jsonc.
+      - uses: actions/checkout@v4
+        with:
+          repository: juanmanuelblanco87/tenedor
+          path: app
+          fetch-depth: 0
+          ssh-key: ${{ secrets.TENEDOR_DEPLOY_KEY }}
+      - name: Ids de las bases D1 (no son secretos; salen de wrangler.jsonc)
+        run: |
+          git -C app fetch --quiet origin "+refs/heads/*:refs/remotes/origin/*" || true
+          for b in app fondo hechos; do
+            id=$( (git -C app show origin/tareas-github:wrangler.jsonc 2>/dev/null || cat app/wrangler.jsonc) | grep -o "\"database_name\": \"tenedor-$b\", \"database_id\": \"[0-9a-f-]*\"" | grep -o '[0-9a-f-]\{36\}')
+            test -n "$id" && echo "D1_$(echo $b | tr a-z A-Z)_ID=$id" >> "$GITHUB_ENV"
+          done
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: |
+          QUE="${{ inputs.que || '--d1 --medios --rotar' }}"
+          # Programado: el primer domingo del mes también el código.
+          [ "${{ github.event_name }}" = schedule ] && [ "$(date -u +%d)" -le 7 ] && QUE="$QUE --codigo"
+          E=""
+          if [ "${{ github.event_name }}" = schedule ]; then [ "${{ vars.RESPALDO_ESCRIBIR }}" = si ] && E="--escribir"; else [ "${{ inputs.escribir }}" = si ] && E="--escribir"; fi
+          node respaldo.mjs $QUE $E --minutos 320 --tope-filas 50000000 || true

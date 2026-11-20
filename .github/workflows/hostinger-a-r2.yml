@@ -1,0 +1,51 @@
+# Mudanza final Hostinger → R2 (hostinger-a-r2.mjs, 20/11/2026). SÓLO a mano y en MODO PRUEBA por defecto: arma la cola,
+# dice qué copiaría y qué filas repuntaría, y no escribe nada. Con «escribir = si» copia lo que falta a R2 y repunta las
+# filas de D1 a media.tenedor.com.ar, con registro en R2 (control/hostinger-a-r2/registro/<corrida>/). Se vuelve a
+# lanzar sola mientras quede trabajo (salvo variable del repo HOSTINGER_A_R2 = apagado). Fuera de las horas pico.
+# Volver atrás: restaurar = <número de la corrida> (y escribir = si).
+name: hostinger-a-r2
+on:
+  workflow_dispatch:
+    inputs:
+      escribir: { description: "si = copia y repunta (si no, modo prueba)", required: false, default: "no" }
+      rearmar: { description: "si = rehace la cola aunque haya una reciente", required: false, default: "no" }
+      copiar: { description: "Tope de archivos a copiar por corrida", required: false, default: "20000" }
+      repuntar: { description: "Tope de filas a repuntar por corrida", required: false, default: "200000" }
+      restaurar: { description: "Número de corrida a deshacer (vacío = no)", required: false, default: "" }
+concurrency:
+  group: hostinger-a-r2
+  cancel-in-progress: false
+permissions:
+  actions: write
+  contents: read
+jobs:
+  mudanza:
+    runs-on: ubuntu-latest
+    timeout-minutes: 115
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_APP_ID: ${{ secrets.D1_APP_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+    outputs:
+      quedan: ${{ steps.m.outputs.quedan }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - id: m
+        run: |
+          A="--copiar ${{ inputs.copiar || '20000' }} --repuntar ${{ inputs.repuntar || '200000' }} --a-la-vez 3 --pausa 150 --minutos 100 --tope-filas 1500000"
+          [ "${{ inputs.escribir }}" = "si" ] && A="$A --escribir"
+          [ "${{ inputs.rearmar }}" = "si" ] && A="$A --rearmar"
+          [ -n "${{ inputs.restaurar }}" ] && A="--restaurar ${{ inputs.restaurar }} $([ "${{ inputs.escribir }}" = "si" ] && echo --escribir)"
+          node hostinger-a-r2.mjs $A || true
+  seguir:
+    needs: mudanza
+    if: always() && inputs.escribir == 'si' && inputs.restaurar == '' && needs.mudanza.outputs.quedan != '' && needs.mudanza.outputs.quedan != '0' && vars.HOSTINGER_A_R2 != 'apagado'
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 600 && gh workflow run hostinger-a-r2.yml -R ${{ github.repository }} -f escribir=si -f copiar=${{ inputs.copiar }} -f repuntar=${{ inputs.repuntar }}
+        env: { GH_TOKEN: "${{ github.token }}" }
