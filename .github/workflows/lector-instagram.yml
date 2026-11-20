@@ -1,0 +1,125 @@
+# Lector de Instagram vía anonyig (20/11/2026, dueño: «nada masivo desde la red del dueño»): lo que hacía
+# tenedor-cf/anonyig-continuo.sh en la PC, acá en GitHub (repo público, minutos gratis). El código sigue privado: se baja
+# con la deploy key de SÓLO LECTURA (secreto TENEDOR_DEPLOY_KEY), rama tareas-github; el lector es
+# scripts/cf/anonyig-lector.mts (usa la página como una persona, con Chromium sin pantalla).
+# Orden por corrida (igual que el .sh): --tops; si no quedó nada, --a-sin-reel; después --sin-video; después el normal.
+# Los tres primeros con --cadena (motor de verticales, paso 3). Una sola ventana y 20 s de pausa: ~60 cuentas por corrida.
+# Cortes (no se evaden): si anonyig pide verificación anti-bots o la página falla 5 veces seguidas, queda el alto y las
+# corridas siguientes NO leen hasta que alguien lo borre (workflow_dispatch con borrar_alto). Si son 5 cuentas seguidas
+# sin datos, se espera 1 h como en la PC.
+# Estado entre corridas (lo leído, el log del motor y el alto): caché de Actions (no queda en el repo público).
+# ANTECEDENTE: el 09/11 (prueba-anonyig.yml, run 42548558373) la página no mostró el campo de búsqueda en las 20 cuentas
+# («locator.fill: Timeout»). Antes de prender el horario: probar a mano con pocas cuentas (input `cuentas`).
+name: lector-instagram
+on:
+  # Cada 2 h, a los :17. Si la prueba a mano no anda, la primera corrida programada corta sola (alto) a las 5 cuentas.
+  schedule:
+    - cron: "17 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      cuentas:
+        description: "Tope de cuentas en esta corrida (prueba: 10)"
+        default: "10"
+      modo:
+        description: "continuo (tops → a-sin-reel → sin-video → normal) o uno solo: tops | a-sin-reel | sin-video | normal"
+        default: "continuo"
+      sin_escribir:
+        description: "Sólo leer, sin escribir en la base"
+        type: boolean
+        default: false
+      borrar_alto:
+        description: "Borrar el alto que dejó un corte anterior (sólo si ya se revisó por qué cortó)"
+        type: boolean
+        default: false
+concurrency:
+  group: lector-instagram
+  cancel-in-progress: false
+jobs:
+  leer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # Por variables de entorno (no pegados en el script): así un texto raro en los inputs no se ejecuta.
+      CUENTAS: ${{ inputs.cuentas || '60' }}
+      MODO: ${{ inputs.modo || 'continuo' }}
+      SIN_ESCRIBIR: ${{ inputs.sin_escribir && '--sin-escribir' || '' }}
+      BORRAR_ALTO: ${{ inputs.borrar_alto && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: juanmanuelblanco87/tenedor
+          ref: tareas-github
+          ssh-key: ${{ secrets.TENEDOR_DEPLOY_KEY }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      # La misma versión que usa la PC (1.63.0). No va en package.json: sólo la usa este lector.
+      - name: Chromium
+        timeout-minutes: 10
+        run: |
+          npm i --no-save --no-audit --no-fund playwright-core@1.63.0
+          npx playwright-core install --with-deps chromium
+      - name: Estado de corridas anteriores
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            anonyig-hechos.txt
+            anonyig-hechos-sinvideo.txt
+            anonyig-lector.log.jsonl
+            anonyig.alto
+          key: lector-instagram-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: lector-instagram-
+      - name: Leer
+        run: |
+          [[ "$CUENTAS" =~ ^[0-9]+$ ]] || { echo "cuentas tiene que ser un número"; exit 1; }
+          [ "$CUENTAS" -le 120 ] || { echo "más de 120 cuentas por corrida no (tope moderado)"; exit 1; }
+          if [ -f anonyig.alto ]; then
+            echo "Alto anterior: $(cat anonyig.alto)"
+            if [ -n "$BORRAR_ALTO" ]; then rm -f anonyig.alto; echo "Alto borrado a mano."
+            elif grep -qE "anti-bots|errores seguidos" anonyig.alto; then echo "Corte que no se reintenta solo: no leo."; exit 0
+            else
+              cuando=$(sed 's/.* · //' anonyig.alto); edad=$(( $(date +%s) - $(date -d "$cuando" +%s 2>/dev/null || echo 0) ))
+              [ "$edad" -ge 3600 ] || { echo "Corte hace menos de 1 h: no leo."; exit 0; }
+              rm -f anonyig.alto
+            fi
+          fi
+          leer() {
+            echo "::group::corrida $1"
+            npx tsx --conditions=react-server scripts/cf/anonyig-lector.mts "$@" --max="$CUENTAS" --pausa=20 --ventanas=1 $SIN_ESCRIBIR 2>&1 | tee ultima.log
+            echo "::endgroup::"
+            grep -E "^Listo|BLOQUEO|Barrera de gasto" ultima.log | tail -2 || true
+          }
+          vacia() { grep -q "en esta corrida: 0" ultima.log && [ ! -f anonyig.alto ]; }
+          case "$MODO" in
+            tops) leer --cadena --tops ;;
+            a-sin-reel) leer --cadena --a-sin-reel ;;
+            sin-video) leer --cadena --sin-video ;;
+            normal) leer ;;
+            continuo)
+              leer --cadena --tops
+              if vacia; then leer --cadena --a-sin-reel
+                if vacia; then leer --cadena --sin-video
+                  if vacia; then leer; fi
+                fi
+              fi ;;
+            *) echo "modo desconocido: $MODO"; exit 1 ;;
+          esac
+          if [ -f anonyig.alto ]; then echo "::warning::anonyig cortó: $(cat anonyig.alto)"; fi
+      - name: Guardar el estado
+        if: always()
+        run: |
+          touch anonyig-hechos.txt anonyig-hechos-sinvideo.txt anonyig-lector.log.jsonl
+          tail -n 20000 anonyig-lector.log.jsonl > l.tmp && mv l.tmp anonyig-lector.log.jsonl
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            anonyig-hechos.txt
+            anonyig-hechos-sinvideo.txt
+            anonyig-lector.log.jsonl
+            anonyig.alto
+          key: lector-instagram-${{ github.run_id }}-${{ github.run_attempt }}
