@@ -1,0 +1,49 @@
+# Pruebas (CI) de la app (20/11/2026, mapa de Roberto §2.3 y duda 8 del dueño: «pasar las pruebas al repo público»).
+# El repo privado juanmanuelblanco87/tenedor tiene su pruebas.yml frenado por el pago de GitHub: acá corren gratis.
+# El código sigue privado: se baja con la deploy key de SÓLO LECTURA (secreto TENEDOR_DEPLOY_KEY), igual que cf-imagenes.
+# No usa ningún otro secreto, no toca producción ni publica nada: tipos + `npm test` + `npm run cf:test` (D1 en memoria).
+# Los registros son públicos (repo público): muestran nombres de tests y errores, nunca claves (no hay ninguna cargada).
+#
+# Cuándo corre:
+#   - todas las noches (04:17 de Buenos Aires) sobre la rama de trabajo (aperturas);
+#   - a mano (Actions › pruebas-app › Run workflow) eligiendo la rama: es el paso a correr antes de cada «publicá».
+# Un push al repo privado no puede disparar un workflow de este repo sin un token con permisos sobre los dos (y el
+# privado tiene Actions frenado): por eso no hay `on: push`.
+name: pruebas-app
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+    inputs:
+      rama:
+        description: "Rama del repo privado a probar"
+        required: true
+        default: aperturas
+concurrency:
+  group: pruebas-app-${{ inputs.rama || 'aperturas' }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: juanmanuelblanco87/tenedor
+          ref: ${{ inputs.rama || 'aperturas' }}
+          ssh-key: ${{ secrets.TENEDOR_DEPLOY_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci --no-audit --no-fund
+      - name: Tipos
+        run: |
+          rm -rf .next/types
+          npx next typegen
+          npx tsc --noEmit -p .
+      - name: Tests de src/lib (npm test)
+        run: npm test
+      - name: Tests de la capa D1, el Worker y los scripts (npm run cf:test)
+        run: npm run cf:test
