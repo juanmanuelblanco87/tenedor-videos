@@ -157,6 +157,10 @@ async function afuera(v, como, que) {
   await d1("UPDATE publicaciones SET oculta = 1 WHERE id = ?", [String(v.id)]);
   await d1("DELETE FROM videos_elegidos WHERE publicacion_id = ?", [String(v.id)]);
   await anotar(v, false, como, que, "oculta");
+  // Motor de videos verticales, C3 (Roberto r3, 20/11): el comercio vuelve a ordenarse YA (cola_ordenar, la atiende el
+  // cron de orientación), así el lugar del rechazado lo ocupa el siguiente sin esperar la vuelta de 2 días. Sin la tabla
+  // (migración app 0050 sin aplicar) no frena la revisión.
+  await d1("INSERT OR IGNORE INTO cola_ordenar (restaurante_id, por) VALUES (?, 'revisor')", [String(v.rid)]).catch(() => {});
   console.log(`✗ ${v.nombre} [${como}]: ${que}`);
 }
 let seguidos = 0;
