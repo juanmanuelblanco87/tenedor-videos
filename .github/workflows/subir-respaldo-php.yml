@@ -1,0 +1,41 @@
+# Publica respaldo.php en datos.tenedor.com.ar (subir-respaldo-php.mjs, 20/11/2026): la API de archivos de Hostinger
+# (upload-urls) daba 502 desde la PC; esto lo reintenta cada hora hasta que ande y, cuando queda publicado y con el
+# secreto instalado, se deshabilita solo. Toma respaldo.php de la app (privada) con la deploy key de sólo lectura, de la
+# rama de la variable RESPALDO_PHP_RAMA (por defecto hostinger-a-r2). Secretos: HOSTINGER_API_TOKEN, HOSTINGER_USUARIO,
+# RESPALDO_SECRET (lo carga el dueño; el mismo que usa respaldo.yml). Sale siempre con 0.
+name: subir-respaldo-php
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+concurrency:
+  group: subir-respaldo-php
+  cancel-in-progress: false
+permissions:
+  actions: write
+  contents: read
+jobs:
+  subir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: juanmanuelblanco87/tenedor
+          ref: ${{ vars.RESPALDO_PHP_RAMA || 'hostinger-a-r2' }}
+          path: app
+          ssh-key: ${{ secrets.TENEDOR_DEPLOY_KEY }}
+          sparse-checkout: hostinger/respaldo.php
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - id: s
+        env:
+          HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
+          HOSTINGER_USUARIO: ${{ secrets.HOSTINGER_USUARIO }}
+          RESPALDO_SECRET: ${{ secrets.RESPALDO_SECRET }}
+        run: node subir-respaldo-php.mjs app/hostinger/respaldo.php || true
+      - if: steps.s.outputs.listo == 'si'
+        run: gh workflow disable subir-respaldo-php.yml -R ${{ github.repository }}
+        env: { GH_TOKEN: "${{ github.token }}" }
