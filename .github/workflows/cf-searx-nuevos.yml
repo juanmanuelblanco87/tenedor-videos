@@ -7,7 +7,7 @@
 #   2. «cola»: los nuevos sin imagen, más reseñas de Google primero; los 1.000 del barrido de Maps de la PC al final.
 # Lo encontrado lo bajan los motores de siempre: Instagram aprobado → ig-nuevas (tarea tenedor-instagram, de noche),
 # web → cascada de imágenes (cf-imagenes.yml), Facebook queda en la ficha.
-# Ritmo: cada 2 h, hasta 120 locales por vuelta, 4 s entre consultas (2 consultas por local, ~15 s por local); corta solo
+# Ritmo: cada 2 h, hasta 120 locales por vuelta, 8 s entre consultas (2 consultas por local, ~20 s por local; Brave suspende 3 min con menos); corta solo
 # a los 3 locales seguidos sin respuesta de los buscadores (bloqueo), si Groq se queda sin cupo o por la barrera de gasto.
 # Secretos (ya cargados en este repo): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, GROQ_API_KEY, TENEDOR_DEPLOY_KEY.
 name: cf-searx-nuevos
@@ -58,7 +58,7 @@ jobs:
         run: |
           max="${{ github.event.inputs.max }}"
           aplicar="${{ github.event_name == 'schedule' || github.event.inputs.aplicar == 'true' }}"
-          npx tsx scripts/cf/searx-pistas.mts --cola=nuevos --max="${max:-120}" --pausa=4 --motores=bing,brave,mojeek,qwant \
+          npx tsx scripts/cf/searx-pistas.mts --cola=nuevos --max="${max:-120}" --pausa=8 --motores=bing,brave,mojeek,qwant \
             --al-final=scripts/cf/searx/maps-nuevos-1000.txt --salida=searx-pistas.json \
             $([ "$aplicar" = "true" ] && echo --aplicar)
       - if: always()
