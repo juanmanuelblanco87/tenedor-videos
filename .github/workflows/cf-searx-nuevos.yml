@@ -1,0 +1,69 @@
+# 21/11/2026 (dueño: «Instagram y web gratis, en GitHub»): pistas de Instagram, web y Facebook para los locales NUEVOS sin
+# imagen (16.650 altas del 19 al 21/11 sin foto ni Instagram) y para las altas de cada día, con SearXNG levantado ACÁ
+# adentro (nunca en la PC del dueño) y un modelo gratis de Groq que elige sólo entre lo que devolvió la búsqueda.
+# Código privado: scripts/cf/searx-pistas.mts --cola=nuevos de la rama `tareas-searx` del repo privado (deploy key de
+# sólo lectura, TENEDOR_DEPLOY_KEY), con la regla de la cola en src/lib/enriquecer-altas.ts:
+#   1. «altas»: las altas posteriores al cursor van primero (el mismo día del alta).
+#   2. «cola»: los nuevos sin imagen, más reseñas de Google primero; los 1.000 del barrido de Maps de la PC al final.
+# Lo encontrado lo bajan los motores de siempre: Instagram aprobado → ig-nuevas (tarea tenedor-instagram, de noche),
+# web → cascada de imágenes (cf-imagenes.yml), Facebook queda en la ficha.
+# Ritmo: cada 2 h, hasta 120 locales por vuelta, 4 s entre consultas (2 consultas por local, ~15 s por local); corta solo
+# a los 3 locales seguidos sin respuesta de los buscadores (bloqueo), si Groq se queda sin cupo o por la barrera de gasto.
+# Secretos (ya cargados en este repo): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, GROQ_API_KEY, TENEDOR_DEPLOY_KEY.
+name: cf-searx-nuevos
+on:
+  schedule:
+    - cron: "25 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      max:
+        description: "Locales por vuelta"
+        default: "120"
+      aplicar:
+        description: "Escribir en la base (si no, sólo informe)"
+        type: boolean
+        default: true
+concurrency:
+  group: cf-searx-nuevos
+  cancel-in-progress: false
+jobs:
+  pistas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      SEARX_URL: http://localhost:8080
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: juanmanuelblanco87/tenedor
+          ref: tareas-searx
+          ssh-key: ${{ secrets.TENEDOR_DEPLOY_KEY }}
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - name: Levantar SearXNG
+        run: |
+          mkdir -p /tmp/searx && cp scripts/cf/searx/settings.yml /tmp/searx/settings.yml
+          sed -i "s/se-reemplaza-en-el-flujo/$(openssl rand -hex 32)/" /tmp/searx/settings.yml
+          docker run -d --name searx -p 8080:8080 -v /tmp/searx:/etc/searxng searxng/searxng:latest
+          for i in $(seq 1 60); do curl -sf "http://localhost:8080/search?q=prueba&format=json" >/dev/null && break; sleep 2; done
+          curl -s "http://localhost:8080/search?q=restaurante%20mendoza&format=json" | head -c 300; echo
+      - run: npm ci --no-audit --no-fund
+      - name: Pistas (altas del día + cola de nuevos)
+        run: |
+          max="${{ github.event.inputs.max }}"
+          aplicar="${{ github.event_name == 'schedule' || github.event.inputs.aplicar == 'true' }}"
+          npx tsx scripts/cf/searx-pistas.mts --cola=nuevos --max="${max:-120}" --pausa=4 \
+            --al-final=scripts/cf/searx/maps-nuevos-1000.txt --salida=searx-pistas.json \
+            $([ "$aplicar" = "true" ] && echo --aplicar)
+      - if: always()
+        run: docker logs searx 2>&1 | tail -20
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: searx-pistas
+          path: searx-pistas.json
+          if-no-files-found: ignore
+          retention-days: 7
