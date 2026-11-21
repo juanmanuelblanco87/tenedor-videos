@@ -49,13 +49,16 @@ jobs:
           sed -i "s/se-reemplaza-en-el-flujo/$(openssl rand -hex 32)/" /tmp/searx/settings.yml
           docker run -d --name searx -p 8080:8080 -v /tmp/searx:/etc/searxng searxng/searxng:latest
           for i in $(seq 1 60); do curl -sf "http://localhost:8080/search?q=prueba&format=json" >/dev/null && break; sleep 2; done
-          curl -s "http://localhost:8080/search?q=restaurante%20mendoza&format=json" | head -c 300; echo
+          # Prueba con los motores pedidos por nombre: si vuelve vacía, el trabajo para acá (no gasta la cola en búsquedas mudas).
+          r=$(curl -s "http://localhost:8080/search?q=restaurante%20mendoza&format=json&engines=bing,brave,mojeek,qwant")
+          echo "$r" | head -c 300; echo
+          echo "$r" | grep -q '"url"' || { echo "SearXNG devuelve vacío: no sigo"; exit 1; }
       - run: npm ci --no-audit --no-fund
       - name: Pistas (altas del día + cola de nuevos)
         run: |
           max="${{ github.event.inputs.max }}"
           aplicar="${{ github.event_name == 'schedule' || github.event.inputs.aplicar == 'true' }}"
-          npx tsx scripts/cf/searx-pistas.mts --cola=nuevos --max="${max:-120}" --pausa=4 \
+          npx tsx scripts/cf/searx-pistas.mts --cola=nuevos --max="${max:-120}" --pausa=4 --motores=bing,brave,mojeek,qwant \
             --al-final=scripts/cf/searx/maps-nuevos-1000.txt --salida=searx-pistas.json \
             $([ "$aplicar" = "true" ] && echo --aplicar)
       - if: always()
