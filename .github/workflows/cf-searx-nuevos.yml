@@ -9,7 +9,9 @@
 # web → cascada de imágenes (cf-imagenes.yml), Facebook queda en la ficha.
 # Ritmo: cada 2 h, hasta 120 locales por vuelta, 8 s entre consultas (2 consultas por local, ~20 s por local; Brave suspende 3 min con menos); corta solo
 # a los 3 locales seguidos sin respuesta de los buscadores (bloqueo), si Groq se queda sin cupo o por la barrera de gasto.
-# Secretos (ya cargados en este repo): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, GROQ_API_KEY, TENEDOR_DEPLOY_KEY.
+# Secretos (ya cargados en este repo), sólo en el paso «Pistas»: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, GROQ_API_KEY;
+# TENEDOR_DEPLOY_KEY en el checkout. Logs y artefacto son PÚBLICOS (datos públicos de comercios: nombres y lo encontrado).
+# Errores y búsquedas mudas se reintentan en las vueltas siguientes (hasta 3 intentos; searx_nuevos.reintentar).
 name: cf-searx-nuevos
 on:
   schedule:
@@ -23,6 +25,8 @@ on:
         description: "Escribir en la base (si no, sólo informe)"
         type: boolean
         default: true
+permissions:
+  contents: read
 concurrency:
   group: cf-searx-nuevos
   cancel-in-progress: false
@@ -30,11 +34,6 @@ jobs:
   pistas:
     runs-on: ubuntu-latest
     timeout-minutes: 75
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-      SEARX_URL: http://localhost:8080
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,20 +46,30 @@ jobs:
         run: |
           mkdir -p /tmp/searx && cp scripts/cf/searx/settings.yml /tmp/searx/settings.yml
           sed -i "s/se-reemplaza-en-el-flujo/$(openssl rand -hex 32)/" /tmp/searx/settings.yml
-          docker run -d --name searx -p 8080:8080 -v /tmp/searx:/etc/searxng searxng/searxng:latest
+          # Versión fija (la «latest» 2026.11 ya rompió una vez): la 2026.11.21 que anduvo, por digest.
+          docker run -d --name searx -p 8080:8080 -v /tmp/searx:/etc/searxng searxng/searxng@sha256:fc1d81d7e9d04d3c8b3e23c7162feddf5c3d6aecd32e67a56eaabcb8d8747f79
           for i in $(seq 1 60); do curl -sf "http://localhost:8080/search?q=prueba&format=json" >/dev/null && break; sleep 2; done
           # Prueba con los motores pedidos por nombre: si vuelve vacía, el trabajo para acá (no gasta la cola en búsquedas mudas).
           r=$(curl -s "http://localhost:8080/search?q=restaurante%20mendoza&format=json&engines=bing,brave,mojeek,qwant")
           echo "$r" | head -c 300; echo
           echo "$r" | grep -q '"url"' || { echo "SearXNG devuelve vacío: no sigo"; exit 1; }
+      # Sin secretos en la instalación de dependencias ni en docker: sólo el paso que los usa los recibe.
       - run: npm ci --no-audit --no-fund
       - name: Pistas (altas del día + cola de nuevos)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          SEARX_URL: http://localhost:8080
+          MAX_PEDIDO: ${{ github.event.inputs.max }}
+          APLICAR: ${{ github.event_name == 'schedule' || github.event.inputs.aplicar == 'true' }}
         run: |
-          max="${{ github.event.inputs.max }}"
-          aplicar="${{ github.event_name == 'schedule' || github.event.inputs.aplicar == 'true' }}"
-          npx tsx scripts/cf/searx-pistas.mts --cola=nuevos --max="${max:-120}" --pausa=8 --motores=bing,brave,mojeek,qwant \
-            --al-final=scripts/cf/searx/maps-nuevos-1000.txt --salida=searx-pistas.json \
-            $([ "$aplicar" = "true" ] && echo --aplicar)
+          max="${MAX_PEDIDO:-120}"
+          case "$max" in ''|*[!0-9]*) echo "max inválido: $max"; exit 1 ;; esac
+          [ "$max" -le 300 ] || max=300
+          extra=""
+          [ "$APLICAR" = "true" ] && extra="--aplicar"
+          npx tsx scripts/cf/searx-pistas.mts --cola=nuevos --max="$max" --pausa=8 --motores=bing,brave,mojeek,qwant             --al-final=scripts/cf/searx/maps-nuevos-1000.txt --salida=searx-pistas.json $extra
       - if: always()
         run: docker logs searx 2>&1 | tail -20
       - if: always()
