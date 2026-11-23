@@ -85,6 +85,12 @@ describe("elegir: qué se lee hoy", () => {
     const r = elegir({ estado, slugs, hoy: HOY, tope: 100 });
     assert.deepEqual(r.leer, ["vieja-gastro", "vence-manana", "promo-ene26", "promo-sin-anio"]);
     assert.deepEqual(r.bajasSinPedir, ["vencida"]);
+    // Roberto r1: vencida que NO se leyó el día anterior al fin (corrida cortada): se relee, no es baja sin pedir.
+    const e2 = estadoVacio();
+    e2.slugs["vencida-sin-leer"] = { g: 1, h: sumarDias(HOY, -1), l: sumarDias(HOY, -10) };
+    const r2 = elegir({ estado: e2, slugs: ["vencida-sin-leer"], hoy: HOY, tope: 100 });
+    assert.deepEqual(r2.bajasSinPedir, []);
+    assert.deepEqual(r2.leer, ["vencida-sin-leer"]);
     assert.deepEqual(r.saltear, ["promo-25off-mar25", "promo-oct23"]);
     assert.deepEqual(r.olvidar, ["no-gastro-ida"]);
   });
@@ -124,6 +130,10 @@ describe("procesar: bajas y salteo", () => {
   it("no gastronómica: a salteo; ficha sin datos: error (no cambia nada)", () => {
     assert.deepEqual(procesar({ slug: "n", status: 200, html: ficha("n", { comercio: "Farmacia Central", titulo: "Farmacia Central con Macro", descripcion: "farmacia", tags: [] }), conocido: null, hoy: HOY }).estado, { g: 0, l: HOY });
     assert.ok(procesar({ slug: "n", status: 200, html: "<html></html>", conocido: null, hoy: HOY }).error);
+    // Roberto r1: una ficha sin estado (MODO cambió el formato) es error, no baja.
+    const sinEstado = procesar({ slug: "k", status: 200, html: ficha("k", { estado: "" }), conocido: { g: 1 }, hoy: HOY });
+    assert.ok(sinEstado.error);
+    assert.equal(sinEstado.baja, undefined);
     assert.ok(parsearPromo(ficha("k"), "k"));
   });
 });

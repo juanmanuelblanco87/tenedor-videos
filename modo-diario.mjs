@@ -91,7 +91,9 @@ export function elegir({ estado, slugs, hoy, tope, modo = "diario", inicio = hoy
   const olvidar = [];
   for (const [slug, e] of Object.entries(estado.slugs)) {
     if (e.g === 1) {
-      if (e.h && e.h < hoy) bajasSinPedir.push(slug);
+      // Vencida por fecha: baja sin pedir SÓLO si la leímos el día anterior al fin o después (ahí ya se vio que no la
+      // renovaron). Si esa lectura no ocurrió (tope, corte, Action caído), se relee: pudo renovarse con el mismo slug (Roberto r1).
+      if (e.h && e.h < hoy) (e.l && e.l >= sumarDias(e.h, -1) ? bajasSinPedir : vencen).push(slug);
       else if (!enSitemap.has(slug)) desaparecidas.push(slug);
       else if (modo === "completa") {
         if (!e.l || e.l < inicio) rotacion.push(slug);
@@ -121,6 +123,9 @@ export function procesar({ slug, status, html, conocido, hoy }) {
   if (status !== 200) return { error: `HTTP ${status}` };
   const p = parsearPromo(html, slug);
   if (!p) return { error: "ficha sin datos" };
+  // Sin estado o sin fecha de fin legible (MODO cambió la forma de la ficha): error, nunca baja (Roberto r1: si no, un
+  // cambio de formato daría de baja todas las conocidas en una corrida).
+  if (!p.estado || (p.hasta && !/^\d{4}-\d{2}-\d{2}/.test(p.hasta))) return { error: "ficha sin estado o con fecha rara" };
   if (!esGastro(p)) return { estado: { g: 0, l: hoy } };
   if (!sigueActiva(p, hoy)) return conocido?.g === 1 ? { baja: p.estado !== "active" ? "según MODO la promo ya no está activa" : "venció según MODO", estado: { g: 0, l: hoy } } : { estado: { g: 0, l: hoy } };
   return { promo: aPromoFuente(p), estado: { g: 1, h: p.hasta || "", l: hoy } };
