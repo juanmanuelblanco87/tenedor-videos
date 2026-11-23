@@ -1,0 +1,62 @@
+# Promos de gastronomía DIRECTO de los bancos (23/11/2026, pedido del dueño). Sólo bancos clase (a): página pública con
+# datos estructurados y robots.txt que la deja leer. Hoy: Supervielle. Relevamiento banco por banco:
+# docs/promos-bancos-relevamiento.md (repo privado). El código vive en el repo privado (rama tareas-github), se baja con
+# la deploy key de SÓLO LECTURA (TENEDOR_DEPLOY_KEY): el lector es scripts/cf/promos-bancos-lector.mts.
+#
+# Reglas del lector (no se evaden):
+#  - ANTES de pedir nada al banco pregunta al Worker si la fuente está en «Sólo sugerir» (Ajustes › Promos bancarias ›
+#    Lectores de bancos). Arranca APAGADA: así, una corrida no pide ninguna página.
+#  - robots.txt antes de cada vuelta (TenedorBot), 1 pedido cada 2,1 s, tope de pedidos por corrida (3 para Supervielle).
+#  - 403 / 429 / captcha / robots que ya no deja: corta y deja la fuente «frenada» en Ajustes (no vuelve a leer sola).
+#  - Sin login, sin APIs internas, sin JavaScript. Registro: sólo números. Nada se sube como artifact.
+#  - El Worker empareja con la base y deja SUGERENCIAS (nada se muestra solo; sin cucarda: sin chequeo propio del banco).
+#
+# Sólo a mano por ahora (sin horario): gh workflow run promos-bancos.yml -R juanmanuelblanco87/tenedor-videos
+# Cuando el dueño lo prenda en Ajustes, sumar un horario semanal (la página cambia por campaña), por ejemplo:
+#   schedule: [{ cron: "40 6 * * 1" }]   # lunes 03:40 AR
+name: promos-bancos
+on:
+  workflow_dispatch:
+    inputs:
+      fuente:
+        description: "Banco con lector (hoy: supervielle)"
+        default: "supervielle"
+      solo_contar:
+        description: "Prueba: lee robots.txt + la página SIN preguntar al Worker y sólo cuenta (no manda nada ni frena)"
+        type: boolean
+        default: false
+concurrency:
+  group: promos-bancos
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  leer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Por variables de entorno (no pegados en el script): así un texto raro en los inputs no se ejecuta.
+      FUENTE: ${{ inputs.fuente || 'supervielle' }}
+      SOLO_CONTAR: ${{ inputs.solo_contar && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: juanmanuelblanco87/tenedor
+          ref: tareas-github
+          ssh-key: ${{ secrets.TENEDOR_DEPLOY_KEY }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Leer
+        env:
+          IMPORTADOR_SECRET: ${{ secrets.IMPORTADOR_SECRET }}
+          TENEDOR_BASE: ${{ vars.TENEDOR_BASE || 'https://tenedor.com.ar' }}
+        run: |
+          [[ "$FUENTE" =~ ^[a-z_]{3,30}$ ]] || { echo "fuente inválida"; exit 1; }
+          if [ -n "$SOLO_CONTAR" ]; then
+            npx tsx scripts/cf/promos-bancos-lector.mts --fuente="$FUENTE" --seco --sin-worker
+          else
+            npx tsx scripts/cf/promos-bancos-lector.mts --fuente="$FUENTE"
+          fi
