@@ -32,7 +32,9 @@ export const TOPE_DIARIO = 250;
 export const TOPE_COMPLETA = 5000;
 /** Promos por pedido al Worker (MAX_POR_TANDA de la ingesta) y bajas por pedido. */
 export const POR_TANDA = 10;
-export const BAJAS_POR_TANDA = 100;
+/** 50 = el tope MÍNIMO de bajas por lectura del día en el Worker (topeBajasDelDia): una tanda sola nunca lo pasa, así una
+ *  cola de bajas legítimas se vacía de a ≥ 1 tanda por día en vez de quedar rechazada para siempre (Roberto r2). */
+export const BAJAS_POR_TANDA = 50;
 /** Errores seguidos (no 403/429, que cortan al primero) antes de cortar. */
 const ERRORES_SEGUIDOS = 10;
 /** Tope de la cola de lo leído sin mandar (si el Worker no recibe por días, no crece sin fin). */
