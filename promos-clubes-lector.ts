@@ -36,6 +36,11 @@ export type BeneficioClub = {
   /** Presencial / online («Online» o tienda online: no es consumo en el lugar, no se importa). */
   online: boolean;
   legales: string;
+  /**
+   * Clarín 365 (Roberto r1, 23/11): índices en FichaClub.sucursales de las sucursales donde vale ESTE beneficio (cada
+   * tarjeta trae las suyas: en SushiClub el 2x1 vale en 20 de 31). null = la fuente no lo dice por beneficio (La Nación).
+   */
+  enSucursales?: number[] | null;
 };
 
 export type FichaClub = {
@@ -447,19 +452,21 @@ export function leerClarin(html: string, slug: string): FichaClub | null {
   };
   // Todas las sucursales del comercio (marcadores por provincia), sin repetir.
   const todas: SucursalClub[] = [];
-  const vistas = new Set<string>();
-  const sumar = (x: SucursalClub) => {
+  const indice = new Map<string, number>();
+  const sumar = (x: SucursalClub): number => {
     const k = `${x.direccion}|${x.lat}|${x.lng}`;
-    if (!vistas.has(k) && todas.length < 500) {
-      vistas.add(k);
+    if (!indice.has(k) && todas.length < 500) {
+      indice.set(k, todas.length);
       todas.push(x);
     }
+    return indice.get(k) ?? -1;
   };
   const marcadores = esObj(d.markers) ? d.markers : esObj(det.branchOffices) ? det.branchOffices : {};
   for (const prov of Object.values(marcadores)) for (const x of lista(esObj(prov) ? prov.provinceBranchOffices : null).filter(esObj)) sumar(sucursalDe(x));
   const beneficios: BeneficioClub[] = [];
   for (const card of lista(d.benefitCards).filter(esObj).slice(0, 20)) {
-    for (const x of lista(card.sucursales).filter(esObj)) sumar(sucursalDe(x));
+    // Las sucursales de ESTA tarjeta (sin lista: no se sabe dónde vale → ninguna sucursal la confirma).
+    const propias = [...new Set(lista(card.sucursales).filter(esObj).map((x) => sumar(sucursalDe(x))).filter((n) => n >= 0))];
     const b = lista(card.benefit).filter(esObj)[0] ?? {};
     const tipo = texto(b.type, 20);
     // La vigencia es la de la tarjeta del beneficio. OJO (muestra real 23/11): `benefit[].validUntilDate` trae SIEMPRE la
@@ -476,6 +483,7 @@ export function leerClarin(html: string, slug: string): FichaClub | null {
       sucursales: null,
       online: card.isOnlineStore === true,
       legales: texto(card.termsAndConditions, 1500),
+      enSucursales: propias,
     });
   }
   return {
