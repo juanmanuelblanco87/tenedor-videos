@@ -18,6 +18,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { HOST_CLUB, leerFichaClub, slugClarin, slugLaNacion, urlsDeSitemap, type FichaClub, type FuenteClub } from "./promos-clubes-lector.ts";
+import { planClubes } from "./promos-clubes-plan.mts";
 
 const UA = "TenedorBot/1.0";
 const PAUSA_MS = 2_100;
@@ -48,7 +49,7 @@ const SITEMAP = FUENTE === "club_la_nacion" ? `${BASE}/sitemap-cuentas.xml` : `$
 const slugDe = FUENTE === "club_la_nacion" ? slugLaNacion : slugClarin;
 
 const espera = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const cuenta = { pedidos: 0, sitemap: 0, gastronomia: 0, aLeer: 0, leidas: 0, sinDatos: 0, beneficios: 0, noEncontradas: 0, enviadas: 0, tandas: 0, seguras: 0, dudosas: 0, descartadas: 0, escritas: 0 };
+const cuenta = { parcial: 0, desaparecidas: 0, bajas: 0, bajasAplicadas: 0, vencidasPorFecha: 0, pedidos: 0, sitemap: 0, gastronomia: 0, aLeer: 0, leidas: 0, sinDatos: 0, beneficios: 0, noEncontradas: 0, enviadas: 0, tandas: 0, seguras: 0, dudosas: 0, descartadas: 0, escritas: 0 };
 const fin = (codigo: number, motivo: string) => {
   console.log(JSON.stringify({ fuente: FUENTE, modo: MODO, motivo, ...cuenta }));
   process.exit(codigo);
@@ -110,21 +111,29 @@ async function pedir(url: string): Promise<{ status: number; texto: string }> {
 // ---------- envío al Worker ----------
 const URL_INGESTA = process.env.PROMOS_INGESTA_URL ?? "";
 const SECRETO = process.env.IMPORTADOR_SECRET ?? "";
-/** Los slugs cuentan como leídos recién cuando el Worker los recibió (si está apagado o falla, mañana se vuelven a leer). */
-let alRecibir: (lote: FichaClub[]) => void = () => {};
-async function enviar(lote: FichaClub[]): Promise<void> {
-  if (!lote.length) return;
-  if (SECO) return alRecibir(lote);
-  const r = await fetch(URL_INGESTA, { method: "POST", headers: { authorization: `Bearer ${SECRETO}`, "content-type": "application/json" }, body: JSON.stringify({ fichas: lote }), signal: AbortSignal.timeout(280_000) });
+type Baja = { fuente: FuenteClub; slug: string; motivo: string };
+/** Los slugs cuentan como leídos (o como dados de baja) recién cuando el Worker los recibió: si está apagado, frena o
+ *  falla, mañana se vuelven a leer. */
+let alRecibir: (lote: FichaClub[], bajas: Baja[]) => void = () => {};
+async function post(cuerpo: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const r = await fetch(URL_INGESTA, { method: "POST", headers: { authorization: `Bearer ${SECRETO}`, "content-type": "application/json" }, body: JSON.stringify(cuerpo), signal: AbortSignal.timeout(280_000) });
   const j = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+  if (r.status === 409 && j.frenada) fin(0, "el Worker frenó la corrida por el tope de bajas del día (ver Ajustes)");
   if (r.status === 409 && j.apagado) fin(0, "la fuente está apagada en Ajustes del Worker");
   if (!r.ok || j.ok !== true) fin(1, `el Worker respondió ${r.status}`);
+  return j;
+}
+async function enviar(lote: FichaClub[], bajas: Baja[] = []): Promise<void> {
+  if (!lote.length && !bajas.length) return;
+  if (SECO) return alRecibir(lote, bajas);
+  const j = await post({ fichas: lote, bajas });
   cuenta.tandas++;
   cuenta.enviadas += lote.length;
-  alRecibir(lote);
+  alRecibir(lote, bajas);
   cuenta.seguras += Number(j.seguras ?? 0);
   cuenta.dudosas += Number(j.dudosas ?? 0);
   cuenta.escritas += Number(j.escritas ?? 0);
+  cuenta.bajasAplicadas += Number(j.bajas ?? 0);
   cuenta.descartadas += Object.values((j.descartadas ?? {}) as Record<string, number>).reduce((a, b) => a + Number(b), 0);
   if (Number(j.msBase ?? 0) > MS_BASE_MAX) fin(0, "la base tardó de más en una tanda: corte, sigue mañana");
   await espera(PAUSA_TANDA_MS);
@@ -143,26 +152,44 @@ cuenta.sitemap = urls.length;
 const slugs = [...new Set(urls.map((u) => slugDe(u)).filter((s): s is string => Boolean(s)))].sort();
 cuenta.gastronomia = slugs.length;
 // Si robots.txt prohíbe alguna ficha de gastronomía, la fuente queda frenada (no se elige qué leer y qué no).
-if (slugs.some((s) => !permitido(new URL(FUENTE === "club_la_nacion" ? `${BASE}/beneficios/gastronomia/${s}` : `${BASE}/${s}`).pathname))) fin(3, "robots.txt prohíbe fichas de gastronomía: fuente frenada");
+const linkDe = (s: string) => (FUENTE === "club_la_nacion" ? `${BASE}/beneficios/gastronomia/${s}` : `${BASE}/${s}`);
+if (slugs.some((s) => !permitido(new URL(linkDe(s)).pathname))) fin(3, "robots.txt prohíbe fichas de gastronomía: fuente frenada");
 
 fs.mkdirSync(VISTOS, { recursive: true });
 const archivoVistos = path.join(VISTOS, `${FUENTE}.json`);
 const vistos = new Set<string>(fs.existsSync(archivoVistos) ? (JSON.parse(fs.readFileSync(archivoVistos, "utf8")) as string[]) : []);
-alRecibir = (lote) => {
+alRecibir = (lote, bajas) => {
   for (const f of lote) vistos.add(f.slug);
+  for (const b of bajas) vistos.delete(b.slug);
   fs.writeFileSync(archivoVistos, JSON.stringify([...vistos].sort()));
 };
-const aLeer = (MODO === "nuevos" ? slugs.filter((s) => !vistos.has(s)) : slugs).slice(0, MAX_FICHAS);
-cuenta.aLeer = aLeer.length;
+const plan = planClubes(slugs, [...vistos].sort(), MODO, MAX_FICHAS);
+if (plan.parcial) {
+  cuenta.parcial = 1;
+  console.log(`aviso: sitemap parcial (${plan.parcial.presentes} de ${plan.parcial.conocidos} fichas conocidas): sin bajas por desaparecidas hoy`);
+}
+cuenta.desaparecidas = plan.desaparecidas.length;
+cuenta.aLeer = plan.leer.length;
 
 let lote: FichaClub[] = [];
+let bajas: Baja[] = [];
 /** Sólo para pruebas en la PC (--salida archivo.json): nunca en el Action (repo público). */
 const todas: FichaClub[] = [];
-for (const slug of aLeer) {
-  const link = FUENTE === "club_la_nacion" ? `${BASE}/beneficios/gastronomia/${slug}` : `${BASE}/${slug}`;
-  const r = await pedir(link);
+const BAJAS_POR_TANDA = 50;
+// Primero las desaparecidas (confirmar la baja), después lo que toca leer.
+for (const [slug, desaparecida] of [...plan.desaparecidas.map((s) => [s, true] as const), ...plan.leer.map((s) => [s, false] as const)]) {
+  const r = await pedir(linkDe(slug));
   if (r.status === 404 || r.status === 410) {
     cuenta.noEncontradas++;
+    // Sólo una ficha que conocíamos y el club sacó del sitemap Y responde 404/410 es baja (no poder leer no es baja).
+    if (desaparecida) {
+      bajas.push({ fuente: FUENTE, slug, motivo: `la ficha ya no existe en el club (${r.status})` });
+      cuenta.bajas++;
+      if (bajas.length >= BAJAS_POR_TANDA) {
+        await enviar([], bajas);
+        bajas = [];
+      }
+    }
     continue;
   }
   if (r.status !== 200) continue;
@@ -181,10 +208,16 @@ for (const slug of aLeer) {
   lote.push(ficha);
   if (args.salida) todas.push(ficha);
   if (lote.length >= TANDA) {
-    await enviar(lote);
+    await enviar(lote, bajas);
     lote = [];
+    bajas = [];
   }
 }
-await enviar(lote);
+await enviar(lote, bajas);
+// Cierre: el Worker da de baja las vigentes de esta fuente que ya vencieron por fecha.
+if (!SECO) {
+  const c = await post({ cierre: FUENTE });
+  cuenta.vencidasPorFecha = Number((c.cierre as Record<string, unknown> | undefined)?.bajas ?? 0);
+}
 if (args.salida) fs.writeFileSync(args.salida, JSON.stringify(todas, null, 1));
 fin(0, SECO ? "vuelta completa (seco: no se mandó nada)" : "vuelta completa");
