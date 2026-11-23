@@ -1,0 +1,51 @@
+# Lectura diaria de MODO (23/11/2026, promos automáticas etapa 2; docs/promos-automaticas-roberto.md §1.2 del repo
+# privado). Lee del sitemap de MODO sólo lo NUEVO, 1/7 de las vigentes de gastronomía en rotación y las que vencen mañana,
+# con un TOPE de pedidos por corrida (1 cada 2,1 s, robots.txt antes de cada vuelta, corta ante 403/429/captcha). Manda lo
+# de gastronomía a NUESTRO Worker (POST /api/cron/promos-sugeridas, de a 10, esperando cada respuesta). Nunca usa /api/ de
+# MODO ni map-handler. Nada sale de la red del dueño.
+# APAGADO DE FÁBRICA: antes de pedir una sola página pregunta al Worker; con «Lectura diaria de MODO» (o «Chequeo de la
+# cucarda») apagado en Ajustes › Promos bancarias, no lee nada y termina.
+# Lista de salteo y cola: estado-modo/estado.json en el cache del Action (slugs y fechas públicas de MODO, nada nuestro).
+# Logs y resumen: SÓLO números (el repo es público). Secreto: IMPORTADOR_SECRET (el mismo que tiene el Worker).
+name: modo-diario
+on:
+  schedule:
+    # 03:30 de Argentina (06:30 UTC): la ingesta del Worker queda fuera de 12-15 y 20-24 h.
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+    inputs:
+      tope:
+        description: "Pedidos a MODO como mucho (con robots y sitemap)"
+        default: "250"
+permissions:
+  contents: read
+concurrency:
+  # El mismo grupo que la vuelta completa: nunca dos lectores contra MODO a la vez.
+  group: modo-lector
+  cancel-in-progress: false
+jobs:
+  leer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Estado anterior (lista de salteo y cola)
+        uses: actions/cache/restore@v4
+        with:
+          path: estado-modo
+          key: modo-estado-${{ github.run_id }}
+          restore-keys: modo-estado-
+      - name: Leer MODO y mandar al Worker
+        env:
+          IMPORTADOR_SECRET: ${{ secrets.IMPORTADOR_SECRET }}
+          TENEDOR_BASE: https://tenedor.com.ar
+          TOPE: ${{ inputs.tope || '250' }}
+        run: node modo-diario.mjs diario --tope "$TOPE"
+      - name: Guardar estado
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: estado-modo
+          key: modo-estado-${{ github.run_id }}-${{ github.run_attempt }}

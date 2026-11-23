@@ -16,10 +16,10 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import zlib from "node:zlib";
+import { Bloqueo, PAUSA_MS, bancosDe, crearPedidor, diasTexto, esGastro, hastaLegales, norm, parsearPromo, prioridadSlug } from "./modo-lector.mjs";
 
 const UA = "TenedorBot/0.1 (prueba interna)";
 const BASE = "https://www.modo.com.ar";
-const PAUSA_MS = 2100;
 const HOY = new Date().toISOString().slice(0, 10);
 const args = Object.fromEntries(process.argv.slice(3).map((a, i, l) => (a.startsWith("--") ? [a.slice(2), l[i + 1]] : null)).filter(Boolean));
 const modo = process.argv[2];
@@ -105,167 +105,8 @@ function descifrar() {
   console.log("descifrado en", SALIDA);
 }
 
-// ---------- robots.txt (grupo User-agent: *; regla más larga gana, Allow gana empates) ----------
-function parsearRobots(txt) {
-  const grupos = [];
-  let actual = null;
-  let ultimoFueUA = false;
-  for (const crudo of txt.split(/\r?\n/)) {
-    const linea = crudo.replace(/#.*/, "").trim();
-    if (!linea) continue;
-    const m = linea.match(/^([A-Za-z-]+)\s*:\s*(.*)$/);
-    if (!m) continue;
-    const k = m[1].toLowerCase();
-    const v = m[2].trim();
-    if (k === "user-agent") {
-      if (!ultimoFueUA) grupos.push((actual = { uas: [], reglas: [] }));
-      actual.uas.push(v.toLowerCase());
-      ultimoFueUA = true;
-    } else {
-      ultimoFueUA = false;
-      if (actual && (k === "allow" || k === "disallow")) actual.reglas.push({ allow: k === "allow", ruta: v });
-    }
-  }
-  const mio = grupos.filter((g) => g.uas.some((u) => u !== "*" && "tenedorbot".startsWith(u)));
-  const reglas = (mio.length ? mio : grupos.filter((g) => g.uas.includes("*"))).flatMap((g) => g.reglas);
-  const aRe = (r) => new RegExp("^" + r.replace(/[.+?^{}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\\\$$|\$$/, "$"));
-  return (ruta) => {
-    let mejor = null;
-    for (const r of reglas) {
-      if (!r.ruta) continue;
-      if (aRe(r.ruta).test(ruta) && (!mejor || r.ruta.length > mejor.ruta.length || (r.ruta.length === mejor.ruta.length && r.allow))) mejor = r;
-    }
-    return !mejor || mejor.allow;
-  };
-}
-
-// ---------- pedidos con ritmo y corte ante bloqueo ----------
-let ultimoPedido = 0;
-let pedidos = 0;
-let permitido = () => true;
-class Bloqueo extends Error {}
-async function pedir(url) {
-  const u = new URL(url);
-  if (!permitido(u.pathname + u.search)) throw new Error(`robots.txt prohíbe ${u.pathname}`);
-  const falta = ultimoPedido + PAUSA_MS - Date.now();
-  if (falta > 0) await espera(falta);
-  ultimoPedido = Date.now();
-  pedidos++;
-  const r = await fetch(url, { headers: { "user-agent": UA, "accept-language": "es-AR,es" }, redirect: "follow", signal: AbortSignal.timeout(30_000) });
-  if (r.status === 403 || r.status === 429) throw new Bloqueo(`HTTP ${r.status} en ${url}`);
-  const t = await r.text();
-  if (/captcha|cf-challenge|are you a robot|unusual traffic/i.test(t.slice(0, 5000))) throw new Bloqueo(`captcha en ${url}`);
-  return { status: r.status, texto: t };
-}
-
-// ---------- lectura de una página de promo (payload RSC de Next.js) ----------
-function rscDe(html) {
-  return [...html.matchAll(/self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)/g)].map((m) => JSON.parse(m[1])).join("");
-}
-function objetoDesde(txt, i) {
-  // i apunta a "{"; devuelve el JSON balanceado
-  let prof = 0, enStr = false, esc = false;
-  for (let j = i; j < txt.length; j++) {
-    const c = txt[j];
-    if (enStr) { if (esc) esc = false; else if (c === "\\") esc = true; else if (c === '"') enStr = false; continue; }
-    if (c === '"') enStr = true;
-    else if (c === "{") prof++;
-    else if (c === "}" && --prof === 0) return JSON.parse(txt.slice(i, j + 1));
-  }
-  return null;
-}
-function filaTexto(rsc, id) {
-  const m = new RegExp(`(?:^|\\n)${id}:T([0-9a-f]+),`).exec(rsc);
-  if (!m) return "";
-  const resto = Buffer.from(rsc.slice(m.index + m[0].length), "utf8");
-  return resto.subarray(0, parseInt(m[1], 16)).toString("utf8");
-}
-const sinHtml = (s) => String(s ?? "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
-function parsearPromo(html, slug) {
-  const rsc = rscDe(html);
-  const k = rsc.indexOf('"promotion":{"card"');
-  if (k < 0) return null;
-  const o = objetoDesde(rsc, rsc.indexOf("{", k + 11));
-  if (!o?.promotion) return null;
-  const p = o.promotion;
-  const textos = (sec) => (o.sections?.[sec]?.contents ?? []).map((c) => {
-    const d = typeof c.description === "string" && /^\$[0-9a-f]+$/.test(c.description) ? filaTexto(rsc, c.description.slice(1)) : c.description;
-    return [c.title, sinHtml(d)].filter(Boolean).join(" ");
-  }).join(" ");
-  const ld = rsc.match(/\\?"validThrough\\?":\\?"(\d{4}-\d{2}-\d{2})/);
-  return {
-    slug,
-    url: `${BASE}/promos/${slug}`,
-    id: p.id,
-    titulo: p.title ?? "",
-    nombre: p.name ?? "",
-    descripcion: p.description ?? "",
-    interno: p.short_description ?? "",
-    comercio: p.where || o.card?.content?.row?.[0]?.text || "",
-    beneficio: (o.card?.content?.row ?? []).slice(1).map((r) => r.text).join(" · "),
-    tipo: o.card?.type ?? "",
-    tags: o.meta?.search_tags ?? [],
-    estado: p.status ?? "",
-    estado_calculado: p.calculated_status ?? "",
-    dias: p.days_of_week ?? "",
-    desde: p.start_date ?? "",
-    hasta: p.stop_date ?? "",
-    hasta_ld: ld?.[1] ?? "",
-    horario: [p.daily_start_time, p.daily_stop_time].filter(Boolean).join("-"),
-    medio: p.payment_flow ?? "",
-    credito: o.trigger_params?.credit_list ?? [],
-    debito: o.trigger_params?.debit_list ?? [],
-    tope: o.trigger_params?.cap_amount_period ?? o.trigger_params?.cap_transaction ?? null,
-    cuotas: (o.installments ?? []).length,
-    cuerpo: textos("header") + " " + textos("body"),
-    legales: textos("tyc"),
-  };
-}
-
-// ---------- normalización y clasificación ----------
-const norm = (s) => String(s ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/&/g, " y ").replace(/[^a-z0-9]+/g, " ").trim();
-const GASTRO = /\b(gastro\w*|restaurant\w*|resto|restos|restobar\w*|bar|bares|cafe|cafes|cafeteria\w*|coffee|helader\w*|helados?|parrill\w*|pizz\w*|sushi\w*|cervec\w*|beer\w*|bodegon\w*|hamburgues\w*|burgers?|confiteria\w*|empanad\w*|bistro|grill|trattoria|cantina|comidas?|food\w*|brunch|vermuteria|bakery|pasteleria\w*|panaderia\w*|rotiseria\w*|pastas)\b/;
-const NO_GASTRO = /\b(supermercad\w*|hipermercad\w*|farmac\w*|perfumer\w*|combustible|nafta|estacion de servicio|indumentaria|electro\w*|ferreter\w*|jugueter\w*|veterinar\w*|mascotas)\b/;
-function esGastro(p) {
-  const fuerte = norm([p.titulo, p.nombre, p.comercio, p.interno, p.slug.replace(/-/g, " "), p.tags.join(" "), p.descripcion].join(" "));
-  if (GASTRO.test(fuerte) && !NO_GASTRO.test(norm([p.titulo, p.nombre, p.comercio].join(" ")))) return "fuerte";
-  const leg = norm(p.legales);
-  if (/\b(rubro gastronom\w*|locales gastronomicos|comercios gastronomicos|restaurantes adheridos|bares y restaurantes)\b/.test(leg) && !/no (aplica|valido|participa)\w* (para |en )?(el )?rubro gastronom/.test(leg)) return "debil";
-  return "";
-}
-const BANCOS = [
-  ["Galicia", /galicia/], ["Macro", /\bmacro\b/], ["BBVA", /\bbbva\b|frances/], ["Santander", /santander/], ["ICBC", /\bicbc\b/],
-  ["Nación", /\bbna\b|banco (de la )?nacion/], ["Provincia", /banco (de la )?provincia( de buenos aires)?\b(?! de)|\bbapro\b/], ["Ciudad", /banco (de la )?ciudad/],
-  ["Supervielle", /supervielle/], ["Comafi", /comafi/], ["Credicoop", /credicoop/], ["Patagonia", /patagonia/], ["Hipotecario", /hipotecario/],
-  ["Columbia", /columbia/], ["Bancor", /bancor|banco de (la provincia de )?cordoba/], ["Santa Fe", /banco (de )?santa fe/], ["Entre Ríos", /banco (de )?entre rios/],
-  ["San Juan", /banco (de )?san juan/], ["Santa Cruz", /banco (de )?santa cruz/], ["Chubut", /banco (del )?chubut/], ["Corrientes", /banco (de )?corrientes/],
-  ["Formosa", /banco (de )?formosa/], ["La Pampa", /banco (de )?la pampa|bancodelapampa/], ["Neuquén", /\bbpn\b|banco provincia (del )?neuquen/], ["Tierra del Fuego", /tierra del fuego/],
-  ["La Rioja", /banco rioja/], ["Brubank", /brubank/], ["Openbank", /openbank/], ["Banco del Sol", /banco del sol/], ["BIND", /\bbind\b/], ["Coinag", /coinag/],
-  ["Dino", /\bdino\b/], ["Voii", /\bvoii\b/], ["Reba", /\breba\b/], ["Meridian", /meridian/], ["CMF", /\bcmf\b/], ["Mariva", /mariva/], ["Industrial", /banco industrial/],
-];
-const bancosDe = (p) => {
-  const t = norm([p.titulo, p.descripcion, p.slug.replace(/-/g, " "), p.tags.join(" "), p.legales.slice(0, 800)].join(" "));
-  return BANCOS.filter(([, re]) => re.test(t)).map(([n]) => n);
-};
-const DIAS = { L: "lun", M: "mar", X: "mié", J: "jue", V: "vie", S: "sáb", D: "dom" };
-const diasTexto = (d) => (d === "LMXJVSD" ? "todos" : [...(d || "")].map((c) => DIAS[c] ?? c).join(","));
-// La fecha final que dicen los legales («AL 31/03/2027»): para medir si contradice al dato estructurado.
-function hastaLegales(t) {
-  const fechas = [...String(t).matchAll(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/g)].map((m) => `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`);
-  return fechas.length ? fechas.sort().at(-1) : "";
-}
-
-// ---------- modo LEER ----------
-function prioridadSlug(s) {
-  const m = s.match(/(ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)[a-z]*-?(\d{2})(?!\d)/);
-  let y = m ? +m[2] : null;
-  if (y == null) { const n = s.match(/(?:^|-)(\d{2})(\d{2})(?:-|$)/); if (n && +n[1] >= 20 && +n[1] <= 27) y = +n[1]; }
-  if (y == null) return 1; // sin fecha en el slug: puede estar vigente
-  if (y >= 26 && y <= 30) return 0; // 2026 en adelante
-  if (y === 25) return 2; // 2025: muestra para medir cuántas viejas siguen vigentes
-  if (y >= 20 && y <= 24) return 9; // viejas: no se leen
-  return 1; // número que no es año (ej. «30off»)
-}
+// ---------- modo LEER (robots, ritmo, lectura de la ficha y filtros: modo-lector.mjs, compartido con modo-diario.mjs) ----------
+const lector = crearPedidor({ ua: UA, pausaMs: PAUSA_MS });
 async function leer() {
   const parte = Number(args.parte ?? 1), partes = Number(args.partes ?? 1);
   if (CIFRAR) abrirPrevios();
@@ -275,13 +116,13 @@ async function leer() {
     sellar(`parte-${parte}.enc`, false);
     return;
   }
-  const robots = await pedir(`${BASE}/robots.txt`);
-  permitido = parsearRobots(robots.texto);
-  for (const r of ["/promos", "/promos/sitemap.xml", "/promos/30off-parrillalaemilia-4-macroselecta-nov26"]) if (!permitido(r)) throw new Error(`robots.txt prohíbe ${r}: no se sigue`);
-  if (permitido("/api/promos")) console.log("ojo: robots.txt ya no prohíbe /api/ (igual no se usa)");
+  const robots = await lector.pedir(`${BASE}/robots.txt`);
+  lector.robots(robots.texto);
+  for (const r of ["/promos", "/promos/sitemap.xml", "/promos/30off-parrillalaemilia-4-macroselecta-nov26"]) if (!lector.permitido(r)) throw new Error(`robots.txt prohíbe ${r}: no se sigue`);
+  if (lector.permitido("/api/promos")) console.log("ojo: robots.txt ya no prohíbe /api/ (igual no se usa)");
   let lista = leerJson(buscarPrevios("lista.json")[0]);
   if (!lista) {
-    const sm = await pedir(`${BASE}/promos/sitemap.xml`);
+    const sm = await lector.pedir(`${BASE}/promos/sitemap.xml`);
     const slugs = [...new Set([...sm.texto.matchAll(/<loc>https:\/\/www\.modo\.com\.ar\/promos\/([^<\/?#]+)<\/loc>/g)].map((m) => m[1]))];
     const porPrio = { 0: [], 1: [], 2: [], 9: [] };
     for (const s of slugs) porPrio[prioridadSlug(s)].push(s);
@@ -300,7 +141,7 @@ async function leer() {
   const t0 = Date.now();
   for (const [i, slug] of mios.entries()) {
     try {
-      const r = await pedir(`${BASE}/promos/${slug}`);
+      const r = await lector.pedir(`${BASE}/promos/${slug}`);
       if (r.status !== 200) { errores.push({ slug, status: r.status }); if (++seguidos >= 25) { bloqueo = `25 errores seguidos (último HTTP ${r.status})`; break; } continue; }
       const p = parsearPromo(r.texto, slug);
       if (!p) { errores.push({ slug, status: "sin datos" }); continue; }
@@ -317,8 +158,8 @@ async function leer() {
     if (i % 200 === 0) console.log(`${i}/${mios.length} · ${promos.filter((p) => p.gastro).length} gastro · ${((Date.now() - t0) / 60000).toFixed(1)} min`);
   }
   if (bloqueo) { console.log("CORTE:", bloqueo); escribir("bloqueo.json", { parte, motivo: bloqueo, fecha: new Date().toISOString() }); }
-  escribir(`parte-${parte}.json`, { parte, pedidos, leidas: promos.length, errores, bloqueo, minutos: (Date.now() - t0) / 60000, promos });
-  console.log(`Parte ${parte} lista: ${promos.length} leídas, ${promos.filter((p) => p.gastro).length} gastro, ${errores.length} errores, ${pedidos} pedidos.`);
+  escribir(`parte-${parte}.json`, { parte, pedidos: lector.pedidos, leidas: promos.length, errores, bloqueo, minutos: (Date.now() - t0) / 60000, promos });
+  console.log(`Parte ${parte} lista: ${promos.length} leídas, ${promos.filter((p) => p.gastro).length} gastro, ${errores.length} errores, ${lector.pedidos} pedidos.`);
   sellar(`parte-${parte}.enc`, false);
 }
 
