@@ -42,7 +42,7 @@ const MAX_COLA = 3000;
 /** Si la base tarda más que esto en una tanda (msBase del Worker), se corta y sigue mañana (doc §1.1). */
 const MS_BASE_MAX = Number(process.env.MS_BASE_MAX ?? 5000);
 
-/** Con menos slugs conocidos que esto, no se mide si el sitemap vino parcial (estado chico: pruebas o recién armado). */
+/** Con menos slugs de gastronomía conocidos que esto, no se mide si el sitemap vino parcial (estado chico: pruebas o recién armado). */
 export const MIN_CONOCIDOS_PARCIAL = 100;
 
 export const hoyAR = (ms = Date.now()) => new Date(ms - 3 * 3_600_000).toISOString().slice(0, 10);
@@ -86,7 +86,7 @@ export function guardarEstado(archivo, e) {
  * salteo sin leerlos), `olvidar` (no gastronómicos que ya no están en el sitemap) y `quedan` (lo que no entró en el tope).
  * modo «completa»: además relee TODAS las de gastronomía leídas antes de `inicio` (las demás conocidas no se releen).
  */
-export function elegir({ estado, slugs, hoy, tope, modo = "diario", inicio = hoy, incluirViejas = false }) {
+export function elegir({ estado, slugs, hoy, tope, modo = "diario", inicio = hoy, incluirViejas = false, aceptarSitemap = false }) {
   const enSitemap = new Set(slugs);
   const manana = sumarDias(hoy, 1);
   const desaparecidas = [];
@@ -96,9 +96,12 @@ export function elegir({ estado, slugs, hoy, tope, modo = "diario", inicio = hoy
   const olvidar = [];
   // Sitemap parcial (Roberto r1): si trae menos del 80 % de los slugs que conocemos, no es que MODO los sacó, es que el
   // sitemap vino cortado. Entonces no se olvida nada ni se leen «desaparecidas» para darlas de baja.
-  const conocidos = Object.keys(estado.slugs);
+  // Roberto r2 (C2): se mide SÓLO sobre los de gastronomía (g === 1): los no gastronómicos que MODO saca del sitemap a
+  // diario no deben trabar la corrida. Si el corte es real (MODO achicó el sitemap), la vuelta completa se corre UNA vez
+  // con «aceptar sitemap» (aceptarSitemap) y desde ahí el estado queda al día.
+  const conocidos = Object.entries(estado.slugs).filter(([, e]) => e.g === 1).map(([s]) => s);
   const presentes = conocidos.filter((s) => enSitemap.has(s)).length;
-  const parcial = conocidos.length >= MIN_CONOCIDOS_PARCIAL && presentes < 0.8 * conocidos.length;
+  const parcial = !aceptarSitemap && conocidos.length >= MIN_CONOCIDOS_PARCIAL && presentes < 0.8 * conocidos.length;
   for (const [slug, e] of Object.entries(estado.slugs)) {
     if (parcial && !enSitemap.has(slug)) continue;
     if (e.g === 1) {
@@ -176,7 +179,7 @@ export async function vaciarCola(estado, w, suma, { ahora = Date.now } = {}) {
 }
 
 /** Una corrida. `deps` lo reemplazan las pruebas (fetch de MODO y del Worker, estado, reloj). */
-export async function correr({ modo = "diario", tope, inicio, minSitemap = 100, archivoEstado, base, secreto, fetchModo = fetch, fetchWorker = fetch, pausaMs, ahora = Date.now, log = console.log }) {
+export async function correr({ modo = "diario", tope, inicio, aceptarSitemap = false, minSitemap = 100, archivoEstado, base, secreto, fetchModo = fetch, fetchWorker = fetch, pausaMs, ahora = Date.now, log = console.log }) {
   const hoy = hoyAR(ahora());
   const r = { modo, hoy, leidas: 0, pedidos: 0, nuevas: 0, gastro: 0, bajas: 0, errores: 0, tope, corte: null, aviso: null, quedan: 0, cola: 0, worker: { tandas: 0, nuevas: 0, cambiadas: 0, sinCambios: 0, niveles: 0, bajas: 0, seguras: 0, dudosas: 0, sinLeer: 0, pedidos: 0, escritas: 0 } };
   const w = worker({ base, secreto, fetchImpl: fetchWorker });
@@ -214,11 +217,11 @@ export async function correr({ modo = "diario", tope, inicio, minSitemap = 100, 
     const sm = await pedidor.pedir(`${BASE_MODO}/promos/sitemap.xml`);
     const slugs = sm.status === 200 ? slugsDelSitemap(sm.texto) : [];
     if (slugs.length < minSitemap) throw new Error(`sitemap raro (${slugs.length} slugs, HTTP ${sm.status}): no sigo`);
-    const plan = elegir({ estado, slugs, hoy, tope, modo, inicio: inicio ?? hoy });
+    const plan = elegir({ estado, slugs, hoy, tope, modo, inicio: inicio ?? hoy, aceptarSitemap: modo === "completa" && aceptarSitemap });
     r.quedan = plan.quedan;
     log(`plan: ${JSON.stringify({ sitemap: slugs.length, ...plan.cuentas, leer: plan.leer.length, quedan: plan.quedan, vencidas: plan.bajasSinPedir.length, saltear: plan.saltear.length })}`);
     if (plan.parcial) {
-      r.aviso = `sitemap parcial: trae ${plan.parcial.presentes} de ${plan.parcial.conocidos} slugs conocidos (< 80 %): no se olvidan slugs ni se dan bajas por desaparecidas`;
+      r.aviso = `sitemap parcial: trae ${plan.parcial.presentes} de ${plan.parcial.conocidos} slugs de gastronomía conocidos (< 80 %): no se olvidan slugs ni se dan bajas por desaparecidas. Si es real, correr modo-completa.yml con «aceptar sitemap»`;
       log(r.aviso);
     }
     for (const s of plan.saltear) estado.slugs[s] = { g: 0, l: hoy };
@@ -351,7 +354,7 @@ async function main() {
     return;
   }
   const tope = Math.max(10, Math.min(Number(args.tope ?? (modo === "completa" ? TOPE_COMPLETA : TOPE_DIARIO)) || TOPE_DIARIO, 6000));
-  const r = await correr({ modo, tope, inicio: args.inicio, archivoEstado: process.env.ESTADO_MODO || "estado-modo/estado.json", base, secreto });
+  const r = await correr({ modo, tope, inicio: args.inicio, aceptarSitemap: args["aceptar-sitemap"] === "si", archivoEstado: process.env.ESTADO_MODO || "estado-modo/estado.json", base, secreto });
   console.log(JSON.stringify(r));
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, resumenMarkdown(r));
 }

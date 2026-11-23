@@ -227,15 +227,33 @@ describe("Roberto r1: estado vacío y sitemap parcial", () => {
     const m = modoFalso(Object.fromEntries(conocidos.slice(50).map((s) => [s, ficha(s)])), { slugs: conocidos.slice(50) });
     const w = workerFalso();
     const r = await correr(base({ tope: 250, archivoEstado: archivo, fetchModo: m.fetchModo, fetchWorker: w.fetchWorker }));
-    assert.match(r.aviso, /sitemap parcial: trae 150 de 200/);
+    assert.match(r.aviso, /sitemap parcial: trae 50 de 100 slugs de gastronomía/);
     assert.equal(w.llegaron.bajas.length, 0);
     const faltan = new Set(conocidos.slice(0, 50).map((s) => `/promos/${s}`));
     assert.ok(!m.pedidos.some((u) => faltan.has(new URL(u).pathname)), "no lee las que faltan");
     assert.equal(Object.keys(leerEstado(archivo).slugs).length, 200);
     assert.match(w.llegaron.cierres[0].aviso, /sitemap parcial/);
     // Con el 80 % o más es un día normal: las que faltan se leen (404 → baja).
-    const normal = elegir({ estado, slugs: conocidos.slice(40), hoy: HOY, tope: 1000 });
+    const normal = elegir({ estado, slugs: conocidos.slice(15), hoy: HOY, tope: 1000 });
     assert.equal(normal.parcial, null);
-    assert.equal(normal.cuentas.desaparecidas, 40);
+    assert.equal(normal.cuentas.desaparecidas, 15);
+  });
+  it("C2 (Roberto r2): el 80 % se mide sólo sobre los de gastronomía, y la completa con «aceptar sitemap» lo ignora una vez", () => {
+    const estado = estadoVacio();
+    const g = muchos(100, "g");
+    const n = muchos(400, "n");
+    for (const s of g) estado.slugs[s] = { g: 1, h: sumarDias(HOY, 60), l: HOY };
+    for (const s of n) estado.slugs[s] = { g: 0, l: HOY };
+    // Se fueron 300 de los 400 no gastronómicos (40 % del total presente) y ninguno de gastronomía: día normal.
+    const r = elegir({ estado, slugs: [...g, ...n.slice(300)], hoy: HOY, tope: 1000 });
+    assert.equal(r.parcial, null);
+    assert.equal(r.olvidar.length, 300);
+    // Faltan 30 de gastronomía (70 %): parcial…
+    const corto = [...g.slice(30), ...n];
+    assert.deepEqual(elegir({ estado, slugs: corto, hoy: HOY, tope: 1000 }).parcial, { presentes: 70, conocidos: 100 });
+    // …salvo con «aceptar sitemap» (vuelta completa): se leen las 30 para darlas de baja.
+    const aceptado = elegir({ estado, slugs: corto, hoy: HOY, tope: 1000, modo: "completa", inicio: sumarDias(HOY, 1), aceptarSitemap: true });
+    assert.equal(aceptado.parcial, null);
+    assert.equal(aceptado.cuentas.desaparecidas, 30);
   });
 });

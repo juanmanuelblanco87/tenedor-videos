@@ -12,6 +12,10 @@ on:
       tope_por_parte:
         description: "Pedidos a MODO por parte (3 partes)"
         default: "5000"
+      aceptar_sitemap:
+        description: "Aceptar el sitemap aunque traiga menos del 80 % de las de gastronomía conocidas (sólo si MODO lo achicó de verdad)"
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -36,8 +40,9 @@ jobs:
       - env:
           IMPORTADOR_SECRET: ${{ secrets.IMPORTADOR_SECRET }}
           TOPE: ${{ inputs.tope_por_parte }}
+          ACEPTAR: ${{ inputs.aceptar_sitemap && 'si' || 'no' }}
           INICIO: ${{ steps.inicio.outputs.inicio }}
-        run: node modo-diario.mjs completa --tope "$TOPE" --inicio "$INICIO"
+        run: node modo-diario.mjs completa --tope "$TOPE" --inicio "$INICIO" --aceptar-sitemap "$ACEPTAR"
       - if: always()
         uses: actions/cache/save@v4
         with: { path: estado-modo, key: "modo-estado-${{ github.run_id }}-${{ github.run_attempt }}-p1" }
@@ -54,8 +59,9 @@ jobs:
       - env:
           IMPORTADOR_SECRET: ${{ secrets.IMPORTADOR_SECRET }}
           TOPE: ${{ inputs.tope_por_parte }}
+          ACEPTAR: ${{ inputs.aceptar_sitemap && 'si' || 'no' }}
           INICIO: ${{ needs.parte-1.outputs.inicio }}
-        run: node modo-diario.mjs completa --tope "$TOPE" --inicio "$INICIO"
+        run: node modo-diario.mjs completa --tope "$TOPE" --inicio "$INICIO" --aceptar-sitemap "$ACEPTAR"
       - if: always()
         uses: actions/cache/save@v4
         with: { path: estado-modo, key: "modo-estado-${{ github.run_id }}-${{ github.run_attempt }}-p2" }
@@ -72,8 +78,9 @@ jobs:
       - env:
           IMPORTADOR_SECRET: ${{ secrets.IMPORTADOR_SECRET }}
           TOPE: ${{ inputs.tope_por_parte }}
+          ACEPTAR: ${{ inputs.aceptar_sitemap && 'si' || 'no' }}
           INICIO: ${{ needs.parte-1.outputs.inicio }}
-        run: node modo-diario.mjs completa --tope "$TOPE" --inicio "$INICIO"
+        run: node modo-diario.mjs completa --tope "$TOPE" --inicio "$INICIO" --aceptar-sitemap "$ACEPTAR"
       - if: always()
         uses: actions/cache/save@v4
         with: { path: estado-modo, key: "modo-estado-${{ github.run_id }}-${{ github.run_attempt }}-p3" }
