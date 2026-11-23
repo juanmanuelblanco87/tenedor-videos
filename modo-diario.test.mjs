@@ -151,7 +151,7 @@ describe("correr: de punta a punta (MODO y Worker falsos)", () => {
     const archivo = tmp();
     const m = modoFalso(paginas);
     const w = workerFalso();
-    const r = await correr(base({ tope: 22, archivoEstado: archivo, fetchModo: m.fetchModo, fetchWorker: w.fetchWorker }));
+    const r = await correr(base({ modo: "completa", tope: 22, archivoEstado: archivo, fetchModo: m.fetchModo, fetchWorker: w.fetchWorker }));
     assert.ok(m.pedidos.length <= 22);
     assert.equal(r.leidas, 20);
     assert.equal(r.quedan, 10);
@@ -169,7 +169,7 @@ describe("correr: de punta a punta (MODO y Worker falsos)", () => {
     const paginas = { [slugs[0]]: ficha(slugs[0]), [slugs[1]]: 429, [slugs[2]]: ficha(slugs[2]) };
     const m = modoFalso(paginas, { slugs: [...slugs, ...muchos(100, "relleno")] });
     const w = workerFalso();
-    const r = await correr(base({ tope: 250, archivoEstado: tmp(), fetchModo: m.fetchModo, fetchWorker: w.fetchWorker }));
+    const r = await correr(base({ modo: "completa", tope: 250, archivoEstado: tmp(), fetchModo: m.fetchModo, fetchWorker: w.fetchWorker }));
     assert.match(r.corte, /429/);
     assert.equal(m.pedidos.length, 4);
     assert.equal(w.llegaron.promos.length, 1);
@@ -178,7 +178,7 @@ describe("correr: de punta a punta (MODO y Worker falsos)", () => {
   it("robots.txt que prohíbe las fichas: corta sin leer ninguna y el cierre lo dice (el Worker frena la fuente)", async () => {
     const m = modoFalso({ k: ficha("k") }, { robots: "User-agent: *\nDisallow: /promos/\n" });
     const w = workerFalso();
-    const r = await correr(base({ tope: 250, archivoEstado: tmp(), fetchModo: m.fetchModo, fetchWorker: w.fetchWorker }));
+    const r = await correr(base({ modo: "completa", tope: 250, archivoEstado: tmp(), fetchModo: m.fetchModo, fetchWorker: w.fetchWorker }));
     assert.match(r.corte, /^robots/);
     assert.equal(m.pedidos.length, 1);
     assert.match(w.llegaron.cierres[0].corte, /^robots/);
@@ -186,7 +186,7 @@ describe("correr: de punta a punta (MODO y Worker falsos)", () => {
   it("si el Worker no recibe, lo leído queda en la cola y sale primero en la próxima corrida (sin volver a pedirlo a MODO)", async () => {
     const paginas = Object.fromEntries(muchos(105).map((s) => [s, ficha(s)]));
     const archivo = tmp();
-    const r = await correr(base({ tope: 15, archivoEstado: archivo, fetchModo: modoFalso(paginas).fetchModo, fetchWorker: workerFalso({ falla: true }).fetchWorker }));
+    const r = await correr(base({ modo: "completa", tope: 15, archivoEstado: archivo, fetchModo: modoFalso(paginas).fetchModo, fetchWorker: workerFalso({ falla: true }).fetchWorker }));
     assert.match(r.corte, /Worker/);
     const enCola = leerEstado(archivo).cola.length;
     assert.ok(enCola >= 10);
@@ -205,5 +205,37 @@ describe("correr: de punta a punta (MODO y Worker falsos)", () => {
     await correr(base({ tope: 250, archivoEstado: archivo, fetchModo: modoFalso({}, { slugs: muchos(100, "otra") }).fetchModo, fetchWorker: w.fetchWorker }));
     assert.deepEqual(w.llegaron.bajas.map((b) => b.slug).sort(), ["se-fue", "vencio"]);
     assert.equal(leerEstado(archivo).slugs["se-fue"], undefined);
+  });
+});
+
+describe("Roberto r1: estado vacío y sitemap parcial", () => {
+  it("estado vacío en la diaria (cache perdido): no pide NADA a MODO ni gasta el tope; el cierre lo avisa", async () => {
+    const m = modoFalso(Object.fromEntries(muchos(200).map((x) => [x, ficha(x)])));
+    const w = workerFalso();
+    const r = await correr(base({ tope: 250, archivoEstado: tmp(), fetchModo: m.fetchModo, fetchWorker: w.fetchWorker }));
+    assert.equal(m.pedidos.length, 0);
+    assert.match(r.aviso, /estado vacío.*completa/);
+    assert.match(w.llegaron.cierres[0].aviso, /estado vacío/);
+  });
+  it("sitemap parcial (< 80 % de los conocidos): no olvida slugs, no lee desaparecidas para darlas de baja, y avisa", async () => {
+    const archivo = tmp();
+    const estado = estadoVacio();
+    const conocidos = muchos(200, "c");
+    for (const [i, s] of conocidos.entries()) estado.slugs[s] = i < 100 ? { g: 1, h: sumarDias(HOY, 60), l: HOY } : { g: 0, l: HOY };
+    fs.writeFileSync(archivo, JSON.stringify(estado));
+    // El sitemap trae sólo 150 de los 200 (75 %): faltan 50 de gastronomía.
+    const m = modoFalso(Object.fromEntries(conocidos.slice(50).map((s) => [s, ficha(s)])), { slugs: conocidos.slice(50) });
+    const w = workerFalso();
+    const r = await correr(base({ tope: 250, archivoEstado: archivo, fetchModo: m.fetchModo, fetchWorker: w.fetchWorker }));
+    assert.match(r.aviso, /sitemap parcial: trae 150 de 200/);
+    assert.equal(w.llegaron.bajas.length, 0);
+    const faltan = new Set(conocidos.slice(0, 50).map((s) => `/promos/${s}`));
+    assert.ok(!m.pedidos.some((u) => faltan.has(new URL(u).pathname)), "no lee las que faltan");
+    assert.equal(Object.keys(leerEstado(archivo).slugs).length, 200);
+    assert.match(w.llegaron.cierres[0].aviso, /sitemap parcial/);
+    // Con el 80 % o más es un día normal: las que faltan se leen (404 → baja).
+    const normal = elegir({ estado, slugs: conocidos.slice(40), hoy: HOY, tope: 1000 });
+    assert.equal(normal.parcial, null);
+    assert.equal(normal.cuentas.desaparecidas, 40);
   });
 });

@@ -40,6 +40,9 @@ const MAX_COLA = 3000;
 /** Si la base tarda más que esto en una tanda (msBase del Worker), se corta y sigue mañana (doc §1.1). */
 const MS_BASE_MAX = Number(process.env.MS_BASE_MAX ?? 5000);
 
+/** Con menos slugs conocidos que esto, no se mide si el sitemap vino parcial (estado chico: pruebas o recién armado). */
+export const MIN_CONOCIDOS_PARCIAL = 100;
+
 export const hoyAR = (ms = Date.now()) => new Date(ms - 3 * 3_600_000).toISOString().slice(0, 10);
 export const sumarDias = (d, n) => new Date(Date.parse(`${d}T12:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
 const diaNumero = (d) => Math.round(Date.parse(`${d}T12:00:00Z`) / 86_400_000);
@@ -89,7 +92,13 @@ export function elegir({ estado, slugs, hoy, tope, modo = "diario", inicio = hoy
   const rotacion = [];
   const bajasSinPedir = [];
   const olvidar = [];
+  // Sitemap parcial (Roberto r1): si trae menos del 80 % de los slugs que conocemos, no es que MODO los sacó, es que el
+  // sitemap vino cortado. Entonces no se olvida nada ni se leen «desaparecidas» para darlas de baja.
+  const conocidos = Object.keys(estado.slugs);
+  const presentes = conocidos.filter((s) => enSitemap.has(s)).length;
+  const parcial = conocidos.length >= MIN_CONOCIDOS_PARCIAL && presentes < 0.8 * conocidos.length;
   for (const [slug, e] of Object.entries(estado.slugs)) {
+    if (parcial && !enSitemap.has(slug)) continue;
     if (e.g === 1) {
       // Vencida por fecha: baja sin pedir SÓLO si la leímos el día anterior al fin o después (ahí ya se vio que no la
       // renovaron). Si esa lectura no ocurrió (tope, corte, Action caído), se relee: pudo renovarse con el mismo slug (Roberto r1).
@@ -110,7 +119,7 @@ export function elegir({ estado, slugs, hoy, tope, modo = "diario", inicio = hoy
   const aLeerNuevos = nuevos.filter((s) => incluirViejas || !vieja(s)).sort((a, b) => orden(a) - orden(b));
   const todo = [...desaparecidas, ...vencen, ...aLeerNuevos, ...rotacion];
   const cupo = Math.max(0, tope - 2);
-  return { leer: todo.slice(0, cupo), quedan: Math.max(0, todo.length - cupo), bajasSinPedir, saltear, olvidar, cuentas: { desaparecidas: desaparecidas.length, vencen: vencen.length, nuevos: aLeerNuevos.length, rotacion: rotacion.length } };
+  return { leer: todo.slice(0, cupo), quedan: Math.max(0, todo.length - cupo), bajasSinPedir, saltear, olvidar, parcial: parcial ? { presentes, conocidos: conocidos.length } : null, cuentas: { desaparecidas: desaparecidas.length, vencen: vencen.length, nuevos: aLeerNuevos.length, rotacion: rotacion.length } };
 }
 
 /**
@@ -167,7 +176,7 @@ export async function vaciarCola(estado, w, suma, { ahora = Date.now } = {}) {
 /** Una corrida. `deps` lo reemplazan las pruebas (fetch de MODO y del Worker, estado, reloj). */
 export async function correr({ modo = "diario", tope, inicio, minSitemap = 100, archivoEstado, base, secreto, fetchModo = fetch, fetchWorker = fetch, pausaMs, ahora = Date.now, log = console.log }) {
   const hoy = hoyAR(ahora());
-  const r = { modo, hoy, leidas: 0, pedidos: 0, nuevas: 0, gastro: 0, bajas: 0, errores: 0, tope, corte: null, quedan: 0, cola: 0, worker: { tandas: 0, nuevas: 0, cambiadas: 0, sinCambios: 0, niveles: 0, bajas: 0, seguras: 0, dudosas: 0, sinLeer: 0, pedidos: 0, escritas: 0 } };
+  const r = { modo, hoy, leidas: 0, pedidos: 0, nuevas: 0, gastro: 0, bajas: 0, errores: 0, tope, corte: null, aviso: null, quedan: 0, cola: 0, worker: { tandas: 0, nuevas: 0, cambiadas: 0, sinCambios: 0, niveles: 0, bajas: 0, seguras: 0, dudosas: 0, sinLeer: 0, pedidos: 0, escritas: 0 } };
   const w = worker({ base, secreto, fetchImpl: fetchWorker });
   // 0 · ¿Puede leer? Si no, no se pide NADA a MODO.
   const est = await w.estado().catch((e) => ({ leer: false, motivo: `no se pudo preguntar al Worker (${String(e?.message ?? e).slice(0, 80)})` }));
@@ -185,6 +194,14 @@ export async function correr({ modo = "diario", tope, inicio, minSitemap = 100, 
     r.cola = estado.cola.length;
     return r;
   }
+  // Estado vacío en la diaria (cache del Action perdido, o nunca corrió la completa): NO es un día normal. Leer todo como
+  // nuevo gastaría el tope semanas enteras (14.000 fichas a 248 por día) y taparía la rotación. No se lee nada y se avisa.
+  if (modo === "diario" && !Object.keys(estado.slugs).length) {
+    r.aviso = "estado vacío (cache del Action perdido o primera vez): correr la vuelta completa (modo-completa.yml)";
+    log(r.aviso);
+    guardarEstado(archivoEstado, estado);
+    return cerrar(r, w, log);
+  }
   try {
     // 2 · robots.txt antes de cada vuelta: si prohíbe lo que leemos, se corta (y el Worker frena la fuente).
     const robots = await pedidor.pedir(`${BASE_MODO}/robots.txt`);
@@ -198,6 +215,10 @@ export async function correr({ modo = "diario", tope, inicio, minSitemap = 100, 
     const plan = elegir({ estado, slugs, hoy, tope, modo, inicio: inicio ?? hoy });
     r.quedan = plan.quedan;
     log(`plan: ${JSON.stringify({ sitemap: slugs.length, ...plan.cuentas, leer: plan.leer.length, quedan: plan.quedan, vencidas: plan.bajasSinPedir.length, saltear: plan.saltear.length })}`);
+    if (plan.parcial) {
+      r.aviso = `sitemap parcial: trae ${plan.parcial.presentes} de ${plan.parcial.conocidos} slugs conocidos (< 80 %): no se olvidan slugs ni se dan bajas por desaparecidas`;
+      log(r.aviso);
+    }
     for (const s of plan.saltear) estado.slugs[s] = { g: 0, l: hoy };
     for (const s of plan.olvidar) delete estado.slugs[s];
     for (const s of plan.bajasSinPedir) {
@@ -257,8 +278,14 @@ export async function correr({ modo = "diario", tope, inicio, minSitemap = 100, 
     r.pedidos = pedidor.pedidos;
     guardarEstado(archivoEstado, estado);
   }
-  // 4 · Cierre: números de la corrida (el Worker da de baja las vencidas por fecha y, si fue robots, frena la fuente).
-  const cierre = await w.mandar({ cierre: { corrida: String(process.env.GITHUB_RUN_ID ?? "local"), modo, leidas: r.leidas, pedidos: r.pedidos, nuevas: r.nuevas, gastro: r.gastro, bajas: r.bajas, errores: r.errores, tope, corte: r.corte } }).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+  return cerrar(r, w, log);
+}
+
+/** Cierre: números de la corrida y el aviso (el Worker da de baja las vencidas por fecha y, si fue robots, frena la fuente). */
+async function cerrar(r, w, log) {
+  const cierre = await w
+    .mandar({ cierre: { corrida: String(process.env.GITHUB_RUN_ID ?? "local"), modo: r.modo, leidas: r.leidas, pedidos: r.pedidos, nuevas: r.nuevas, gastro: r.gastro, bajas: r.bajas, errores: r.errores, tope: r.tope, corte: r.corte, aviso: r.aviso } })
+    .catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
   if (cierre.ok !== true) log(`cierre: ${cierre.status ?? ""} ${String(cierre.apagado ?? cierre.error ?? "").slice(0, 120)}`);
   else r.vencidasPorFecha = Number(cierre.dia?.lector?.vencidasPorFecha ?? 0);
   return r;
@@ -282,6 +309,7 @@ export function resumenMarkdown(r) {
     ["Quedan para mañana (tope)", r.quedan],
     ["En cola sin mandar", r.cola],
     ["Corte", r.corte ?? "no"],
+    ["Aviso", r.aviso ?? "no"],
   ];
   return ["### Lectura de MODO", "", "| | |", "|---|---|", ...filas.map(([a, b]) => `| ${a} | ${String(b).replace(/\|/g, "/")} |`), ""].join("\n");
 }
