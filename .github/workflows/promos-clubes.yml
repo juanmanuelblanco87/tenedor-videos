@@ -28,6 +28,10 @@ on:
       max_pedidos:
         description: "Tope de pedidos por club"
         default: "180"
+      aceptar_sitemap:
+        description: "Aceptar el sitemap aunque traiga menos del 80 % de las fichas conocidas (sólo vuelta completa; sólo si el club lo achicó de verdad)"
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -59,6 +63,7 @@ jobs:
         env:
           MODO_PEDIDO: ${{ inputs.modo }}
           MAX_PEDIDO: ${{ inputs.max_pedidos }}
+          ACEPTAR_PEDIDO: ${{ inputs.aceptar_sitemap && 'si' || 'no' }}
         run: |
           modo="nuevos"
           if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ "$(TZ=America/Argentina/Buenos_Aires date +%u)" = "7" ]; then modo="completo"; fi
@@ -67,11 +72,14 @@ jobs:
           if printf '%s' "$MAX_PEDIDO" | grep -Eq '^[0-9]{1,3}$'; then max="$MAX_PEDIDO"; fi
           echo "modo=$modo" >> "$GITHUB_OUTPUT"
           echo "max=$max" >> "$GITHUB_OUTPUT"
+          aceptar="no"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$ACEPTAR_PEDIDO" = "si" ] && [ "$modo" = "completo" ]; then aceptar="si"; fi
+          echo "aceptar=$aceptar" >> "$GITHUB_OUTPUT"
       - name: Leer y enviar
         env:
           IMPORTADOR_SECRET: ${{ secrets.IMPORTADOR_SECRET }}
           PROMOS_INGESTA_URL: ${{ secrets.PROMOS_INGESTA_URL }}
-        run: node --experimental-strip-types promos-clubes.mts --fuente ${{ matrix.fuente }} --modo ${{ steps.modo.outputs.modo }} --max-pedidos ${{ steps.modo.outputs.max }} --vistos vistos
+        run: node --experimental-strip-types promos-clubes.mts --fuente ${{ matrix.fuente }} --modo ${{ steps.modo.outputs.modo }} --max-pedidos ${{ steps.modo.outputs.max }} --aceptar-sitemap ${{ steps.modo.outputs.aceptar }} --vistos vistos
       - if: always()
         uses: actions/cache/save@v4
         with:

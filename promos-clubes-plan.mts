@@ -8,11 +8,12 @@ export const MIN_CONOCIDOS_PARCIAL = 20;
 
 export type Plan = { desaparecidas: string[]; leer: string[]; parcial: { presentes: number; conocidos: number } | null };
 
-export function planClubes(enSitemap: string[], conocidos: string[], modo: "completo" | "nuevos", maxFichas = 400): Plan {
+/** aceptarSitemap (sólo a mano, vuelta completa): el club achicó el sitemap de verdad → se mide igual y hay bajas. */
+export function planClubes(enSitemap: string[], conocidos: string[], modo: "completo" | "nuevos", maxFichas = 400, aceptarSitemap = false): Plan {
   const sitemap = new Set(enSitemap);
   const vistos = new Set(conocidos);
   const presentes = conocidos.filter((s) => sitemap.has(s)).length;
-  const parcial = conocidos.length >= MIN_CONOCIDOS_PARCIAL && presentes < 0.8 * conocidos.length;
+  const parcial = !aceptarSitemap && conocidos.length >= MIN_CONOCIDOS_PARCIAL && presentes < 0.8 * conocidos.length;
   const desaparecidas = parcial ? [] : conocidos.filter((s) => !sitemap.has(s)).sort();
   const leer = (modo === "nuevos" ? enSitemap.filter((s) => !vistos.has(s)) : enSitemap).slice(0, maxFichas);
   return { desaparecidas, leer, parcial: parcial ? { presentes, conocidos: conocidos.length } : null };

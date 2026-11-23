@@ -20,6 +20,12 @@ describe("plan del lector de clubes (bajas y sitemap parcial)", () => {
     assert.deepEqual(p.parcial, { presentes: 79, conocidos: 100 });
     assert.equal(p.leer.length, 79);
   });
+  it("«aceptar sitemap» (a mano, vuelta completa): el parcial no frena y las desaparecidas se confirman", () => {
+    const conocidos = n(100);
+    const p = planClubes(conocidos.slice(0, 79), conocidos, "completo", 400, true);
+    assert.equal(p.parcial, null);
+    assert.equal(p.desaparecidas.length, 21);
+  });
   it("con pocas conocidas (estado recién armado) no se mide el parcial", () => {
     const p = planClubes(["a"], ["a", "b", "c"], "nuevos");
     assert.equal(p.parcial, null);

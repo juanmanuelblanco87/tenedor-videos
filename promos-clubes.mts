@@ -118,7 +118,12 @@ let alRecibir: (lote: FichaClub[], bajas: Baja[]) => void = () => {};
 async function post(cuerpo: Record<string, unknown>): Promise<Record<string, unknown>> {
   const r = await fetch(URL_INGESTA, { method: "POST", headers: { authorization: `Bearer ${SECRETO}`, "content-type": "application/json" }, body: JSON.stringify(cuerpo), signal: AbortSignal.timeout(280_000) });
   const j = (await r.json().catch(() => ({}))) as Record<string, unknown>;
-  if (r.status === 409 && j.frenada) fin(0, "el Worker frenó la corrida por el tope de bajas del día (ver Ajustes)");
+  // Integración (Roberto r2, C1): un freno por el tope de bajas NO termina en verde: el job falla (código 4) y el aviso
+  // queda en el log y en Ajustes (con «Aplicar igual hoy» por fuente).
+  if (r.status === 409 && j.frenada) {
+    console.log(`aviso: ${String(j.apagado ?? "el Worker frenó la corrida por el tope de bajas del día").slice(0, 300)}`);
+    fin(4, "FRENADA por el tope de bajas del día: revisá Ajustes › Promos bancarias");
+  }
   if (r.status === 409 && j.apagado) fin(0, "la fuente está apagada en Ajustes del Worker");
   if (!r.ok || j.ok !== true) fin(1, `el Worker respondió ${r.status}`);
   return j;
@@ -163,7 +168,8 @@ alRecibir = (lote, bajas) => {
   for (const b of bajas) vistos.delete(b.slug);
   fs.writeFileSync(archivoVistos, JSON.stringify([...vistos].sort()));
 };
-const plan = planClubes(slugs, [...vistos].sort(), MODO, MAX_FICHAS);
+// «Aceptar sitemap» sólo a mano y en la vuelta completa (como modo-completa.yml de MODO).
+const plan = planClubes(slugs, [...vistos].sort(), MODO, MAX_FICHAS, MODO === "completo" && args["aceptar-sitemap"] === "si");
 if (plan.parcial) {
   cuenta.parcial = 1;
   console.log(`aviso: sitemap parcial (${plan.parcial.presentes} de ${plan.parcial.conocidos} fichas conocidas): sin bajas por desaparecidas hoy`);
@@ -175,7 +181,9 @@ let lote: FichaClub[] = [];
 let bajas: Baja[] = [];
 /** Sólo para pruebas en la PC (--salida archivo.json): nunca en el Action (repo público). */
 const todas: FichaClub[] = [];
-const BAJAS_POR_TANDA = 50;
+/** Fichas dadas de baja por pedido: 5 (cada una puede tener varias promos) para no pasar sola el tope mínimo de 15 de
+ *  los clubes: así una cola de bajas legítimas se vacía de a ≥ 1 tanda por día en vez de quedar rechazada siempre. */
+const BAJAS_POR_TANDA = 5;
 // Primero las desaparecidas (confirmar la baja), después lo que toca leer.
 for (const [slug, desaparecida] of [...plan.desaparecidas.map((s) => [s, true] as const), ...plan.leer.map((s) => [s, false] as const)]) {
   const r = await pedir(linkDe(slug));
