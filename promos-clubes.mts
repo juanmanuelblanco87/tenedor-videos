@@ -41,15 +41,16 @@ const MODO = args.modo === "nuevos" ? "nuevos" : "completo";
 const SECO = args.seco === "si";
 const MAX_PEDIDOS = Math.max(5, Math.min(400, Number(args["max-pedidos"] ?? 180)));
 const MAX_FICHAS = Math.max(1, Math.min(400, Number(args["max-fichas"] ?? 400)));
-/** Si la base tarda más que esto en una tanda, se corta y sigue mañana (doc §1.1). */
-const MS_BASE_MAX = Number(args["ms-base-max"] ?? 2_000);
+/** Si la base tarda más que esto en una tanda, se corta y sigue mañana (doc §1.1). 23/11: 2 s cortaba la primera tanda
+ *  (5 fichas con emparejamiento y chequeo de cada candidata); con 8 s queda el freno para una base caída, no para una tanda normal. */
+const MS_BASE_MAX = Number(args["ms-base-max"] ?? 8_000);
 const VISTOS = args.vistos ?? "vistos";
 const BASE = `https://${HOST_CLUB[FUENTE]}`;
 const SITEMAP = FUENTE === "club_la_nacion" ? `${BASE}/sitemap-cuentas.xml` : `${BASE}/sitemap.xml`;
 const slugDe = FUENTE === "club_la_nacion" ? slugLaNacion : slugClarin;
 
 const espera = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const cuenta = { parcial: 0, desaparecidas: 0, bajas: 0, bajasAplicadas: 0, vencidasPorFecha: 0, pedidos: 0, sitemap: 0, gastronomia: 0, aLeer: 0, leidas: 0, sinDatos: 0, beneficios: 0, noEncontradas: 0, enviadas: 0, tandas: 0, seguras: 0, dudosas: 0, descartadas: 0, escritas: 0 };
+const cuenta = { parcial: 0, desaparecidas: 0, bajas: 0, bajasAplicadas: 0, vencidasPorFecha: 0, pedidos: 0, sitemap: 0, gastronomia: 0, aLeer: 0, leidas: 0, sinDatos: 0, beneficios: 0, noEncontradas: 0, enviadas: 0, tandas: 0, seguras: 0, dudosas: 0, descartadas: 0, escritas: 0, msBaseMax: 0 };
 const fin = (codigo: number, motivo: string) => {
   console.log(JSON.stringify({ fuente: FUENTE, modo: MODO, motivo, ...cuenta }));
   process.exit(codigo);
@@ -140,6 +141,7 @@ async function enviar(lote: FichaClub[], bajas: Baja[] = []): Promise<void> {
   cuenta.escritas += Number(j.escritas ?? 0);
   cuenta.bajasAplicadas += Number(j.bajas ?? 0);
   cuenta.descartadas += Object.values((j.descartadas ?? {}) as Record<string, number>).reduce((a, b) => a + Number(b), 0);
+  cuenta.msBaseMax = Math.max(cuenta.msBaseMax, Number(j.msBase ?? 0));
   if (Number(j.msBase ?? 0) > MS_BASE_MAX) fin(0, "la base tardó de más en una tanda: corte, sigue mañana");
   await espera(PAUSA_TANDA_MS);
 }
